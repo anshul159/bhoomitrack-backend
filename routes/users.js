@@ -3,10 +3,11 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
+const Organization = require('../models/Organization');
 const auth = require('../middleware/auth');
 
 const makeToken = (user) => jwt.sign(
-  { id: user._id, role: user.role, name: user.name },
+  { id: user._id, role: user.role, name: user.name, orgId: user.orgId },
   process.env.JWT_SECRET || 'bhoomitrack_secret',
   { expiresIn: '30d' }
 );
@@ -159,6 +160,47 @@ router.post('/approve', auth, async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });
     return res.json({ success: true, message: approve ? `${user.name} approved` : `${user.name} rejected` });
   } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── POST /api/users/setup-super-admin ───────────────────────────────────────
+// One-time setup: create Super Admin + Organization
+// Protected by a setup secret key so only you can call this
+router.post('/setup-super-admin', async (req, res) => {
+  try {
+    const { setupKey, name, email, password, orgName } = req.body;
+
+    // Check setup secret
+    if (setupKey !== (process.env.SETUP_KEY || 'bhoomitrack_setup_2024')) {
+      return res.status(403).json({ success: false, message: 'Invalid setup key' });
+    }
+
+    const existing = await User.findOne({ role: 'super_admin' });
+    if (existing) return res.status(400).json({ success: false, message: 'Super admin already exists for this org' });
+
+    // Create org first
+    const org = await Organization.create({ name: orgName || 'My Company' });
+
+    // Create super admin
+    const hashed = await bcrypt.hash(password, 10);
+    const superAdmin = await User.create({
+      name, email: email.toLowerCase(), password: hashed,
+      role: 'super_admin', status: 'approved', orgId: org._id,
+    });
+
+    // Link org to super admin
+    org.superAdminId = superAdmin._id;
+    await org.save();
+
+    return res.json({
+      success: true,
+      message: `Super Admin created for "${orgName}"`,
+      token: makeToken(superAdmin),
+      user: { id: superAdmin._id, name: superAdmin.name, email: superAdmin.email, role: superAdmin.role, orgId: org._id }
+    });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

@@ -11,6 +11,7 @@ app.use(express.json());
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.use('/api/users',     require('./routes/users'));
+app.use('/api/invite',    require('./routes/invite'));
 app.use('/api/sites',     require('./routes/sites'));
 app.use('/api/inventory', require('./routes/inventory'));
 app.use('/api/orders',    require('./routes/orders'));
