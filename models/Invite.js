@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const inviteSchema = new mongoose.Schema({
-  email: { type: String, required: true, lowercase: true, trim: true },
+  email: { type: String, required: false, default: '', lowercase: true, trim: true },
   code: { type: String, required: true },       // 6-digit code sent via email
   orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', required: true },
   invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
