@@ -18,7 +18,7 @@ const makeToken = (user) => jwt.sign(
 router.post('/generate', auth, async (req, res) => {
   try {
     const sender = await User.findById(req.user.id);
-    if (!sender || !['super_admin', 'owner'].includes(sender.role)) {
+    if (!sender || sender.role !== 'super_admin') {
       return res.status(403).json({ success: false, message: 'Only Super Admins or Owners can generate invite codes' });
     }
 
