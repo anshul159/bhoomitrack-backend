@@ -3,6 +3,7 @@ const router = express.Router();
 const auth = require('../middleware/auth');
 const Site = require('../models/Site');
 const Inventory = require('../models/Inventory');
+const User = require('../models/User');
 
 // ─── GET /api/sites ───────────────────────────────────────────────────────────
 router.get('/', auth, async (req, res) => {
@@ -11,15 +12,18 @@ router.get('/', auth, async (req, res) => {
     const data = await Promise.all(sites.map(async (s) => {
       const invCount = await Inventory.countDocuments({ site_name: s.name });
       const lowStock = await Inventory.countDocuments({ site_name: s.name, $expr: { $lt: ['$quantity', '$low_stock_threshold'] } });
+      const managerCount = await User.countDocuments({ role: 'manager', status: 'approved', site_name: s.name });
+      const assignedManager = await User.findOne({ role: 'manager', status: 'approved', site_name: s.name }, 'name phone');
       return {
         id: s._id,
         name: s.name,
         location: s.location,
         owner_id: s.owner_id,
         created_at: s.createdAt,
-        manager_count: 0,
+        manager_count: managerCount,
         total_materials: invCount,
         low_stock_count: lowStock,
+        assigned_manager: assignedManager ? { name: assignedManager.name, phone: assignedManager.phone } : null,
       };
     }));
     return res.json({ success: true, message: 'OK', data });

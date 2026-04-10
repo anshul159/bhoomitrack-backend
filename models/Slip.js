@@ -13,6 +13,7 @@ const slipSchema = new mongoose.Schema({
   manager_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   manager_name: { type: String, default: '' },
   items: [slipItemSchema],
+  status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
 }, { timestamps: true });
 
 module.exports = mongoose.model('Slip', slipSchema);
