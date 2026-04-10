@@ -29,13 +29,11 @@ const userToResponse = (user, token) => ({
 });
 
 // ─── POST /api/users/signup ───────────────────────────────────────────────────
-// Used by manager registration and owner signup
 router.post('/signup', async (req, res) => {
   try {
     const { name, phone, email, password, role, site } = req.body;
 
     if (role === 'owner') {
-      // Owner signup
       if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
       const existing = await User.findOne({ email: email.toLowerCase() });
       if (existing) return res.status(400).json({ success: false, message: 'Email already registered' });
@@ -57,7 +55,6 @@ router.post('/signup', async (req, res) => {
 });
 
 // ─── POST /api/users/login ────────────────────────────────────────────────────
-// Owner login with email + password
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -74,28 +71,88 @@ router.post('/login', async (req, res) => {
 });
 
 // ─── POST /api/users/otp/send ─────────────────────────────────────────────────
-// Check if phone exists; return manager status
+// Generate real 6-digit OTP, store in user, log to console for testing
 router.post('/otp/send', async (req, res) => {
   try {
     const { phone } = req.body;
     if (!phone) return res.status(400).json({ success: false, message: 'Phone required' });
     const user = await User.findOne({ phone, role: 'manager' });
-    // We return success always (no real OTP); the app uses this to check existence
-    return res.json({ success: true, message: 'OK', exists: !!user, status: user?.status || null });
+    if (!user) return res.json({ success: true, message: 'OK', exists: false, status: null });
+
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    await User.findByIdAndUpdate(user._id, { otp, otpExpiry });
+
+    // Log OTP to console (visible in Render logs)
+    console.log(`[OTP LOGIN] Phone: ${phone} | OTP: ${otp} | Expires: ${otpExpiry.toISOString()}`);
+
+    return res.json({ success: true, message: 'OTP sent', exists: true, status: user.status });
   } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
 // ─── POST /api/users/otp/verify ──────────────────────────────────────────────
-// Return manager data by phone (after OTP)
+// Verify OTP and return manager data
 router.post('/otp/verify', async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { phone, otp } = req.body;
+    if (!phone || !otp) return res.status(400).json({ success: false, message: 'Phone and OTP required' });
     const user = await User.findOne({ phone, role: 'manager' });
     if (!user) return res.status(404).json({ success: false, message: 'Manager not found' });
+    if (!user.otp || user.otp !== otp) return res.status(400).json({ success: false, message: 'Invalid OTP. Please check and try again.' });
+    if (user.otpExpiry && new Date() > user.otpExpiry) return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
+
+    // Clear OTP after successful verification
+    await User.findByIdAndUpdate(user._id, { otp: null, otpExpiry: null });
     return res.json(userToResponse(user, makeToken(user)));
   } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── POST /api/users/forgot-password ─────────────────────────────────────────
+// Request password reset token (logged to Render console)
+router.post('/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ success: false, message: 'Email required' });
+    const user = await User.findOne({ email: email.toLowerCase(), role: { $in: ['owner', 'super_admin'] } });
+    if (!user) return res.status(404).json({ success: false, message: 'No account found with this email' });
+
+    const resetToken = Math.floor(100000 + Math.random() * 900000).toString();
+    const tokenExpiry = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
+    await User.findByIdAndUpdate(user._id, { otp: resetToken, otpExpiry: tokenExpiry });
+
+    // Log token to console (visible in Render logs — check render.com dashboard)
+    console.log(`[PASSWORD RESET] Email: ${email} | Token: ${resetToken} | Expires: ${tokenExpiry.toISOString()}`);
+
+    return res.json({ success: true, message: 'Reset token generated. Check Render logs for the token.' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── POST /api/users/reset-password ──────────────────────────────────────────
+// Verify token and set new password
+router.post('/reset-password', async (req, res) => {
+  try {
+    const { email, token, newPassword } = req.body;
+    if (!email || !token || !newPassword) return res.status(400).json({ success: false, message: 'Email, token and new password required' });
+    const user = await User.findOne({ email: email.toLowerCase(), role: { $in: ['owner', 'super_admin'] } });
+    if (!user) return res.status(404).json({ success: false, message: 'Account not found' });
+    if (!user.otp || user.otp !== token) return res.status(400).json({ success: false, message: 'Invalid reset token' });
+    if (user.otpExpiry && new Date() > user.otpExpiry) return res.status(400).json({ success: false, message: 'Token expired. Please request a new reset.' });
+    if (newPassword.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await User.findByIdAndUpdate(user._id, { password: hashed, otp: null, otpExpiry: null });
+    return res.json({ success: true, message: 'Password reset successfully. You can now log in.' });
+  } catch (err) {
+    console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -111,26 +168,42 @@ router.get('/profile', auth, async (req, res) => {
   }
 });
 
-// ─── GET /api/users/check-phone/:phone ───────────────────────────────────────
-// Check if manager phone exists and return their status
-router.get('/check-phone/:phone', async (req, res) => {
+// ─── GET /api/users/owner ─────────────────────────────────────────────────────
+// Manager: get the owner/super_admin for their org
+router.get('/owner', auth, async (req, res) => {
   try {
-    const user = await User.findOne({ phone: req.params.phone, role: 'manager' });
-    return res.json({
-      success: true,
-      exists: !!user,
-      status: user?.status || null,
-      site_name: user?.site_name || '',
-      name: user?.name || '',
-      user: user ? userToResponse(user, makeToken(user)).user : null
+    const caller = await User.findById(req.user.id);
+    if (!caller) return res.status(403).json({ success: false, message: 'User not found' });
+    // Find owner or super_admin in same org
+    const owner = await User.findOne({
+      role: { $in: ['owner', 'super_admin'] },
+      orgId: caller.orgId
     });
+    if (!owner) return res.status(404).json({ success: false, message: 'No owner found for your org' });
+    return res.json({ success: true, data: { id: owner._id, name: owner.name, phone: owner.phone || '', site_name: '' } });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── GET /api/users/managers ──────────────────────────────────────────────────
+// Owner: list all approved managers
+router.get('/managers', auth, async (req, res) => {
+  try {
+    const managers = await User.find({ role: 'manager', status: 'approved' }).sort({ name: 1 });
+    const data = managers.map(m => ({
+      id: m._id,
+      name: m.name,
+      phone: m.phone || '',
+      site_name: m.site_name || '',
+    }));
+    return res.json({ success: true, message: 'OK', data });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
 
 // ─── GET /api/users/pending ───────────────────────────────────────────────────
-// Owner: list all pending managers
 router.get('/pending', auth, async (req, res) => {
   try {
     const managers = await User.find({ role: 'manager', status: 'pending' }).sort({ createdAt: -1 });
@@ -147,8 +220,24 @@ router.get('/pending', auth, async (req, res) => {
   }
 });
 
+// ─── GET /api/users/check-phone/:phone ───────────────────────────────────────
+router.get('/check-phone/:phone', async (req, res) => {
+  try {
+    const user = await User.findOne({ phone: req.params.phone, role: 'manager' });
+    return res.json({
+      success: true,
+      exists: !!user,
+      status: user?.status || null,
+      site_name: user?.site_name || '',
+      name: user?.name || '',
+      user: user ? userToResponse(user, makeToken(user)).user : null
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── POST /api/users/approve ──────────────────────────────────────────────────
-// Owner: approve or reject a manager, and optionally assign a site
 router.post('/approve', auth, async (req, res) => {
   try {
     const { userId, approve, siteName } = req.body;
@@ -165,34 +254,22 @@ router.post('/approve', auth, async (req, res) => {
 });
 
 // ─── POST /api/users/setup-super-admin ───────────────────────────────────────
-// One-time setup: create Super Admin + Organization
-// Protected by a setup secret key so only you can call this
 router.post('/setup-super-admin', async (req, res) => {
   try {
     const { setupKey, name, email, password, orgName } = req.body;
-
-    // Check setup secret
     if (setupKey !== (process.env.SETUP_KEY || 'bhoomitrack_setup_2024')) {
       return res.status(403).json({ success: false, message: 'Invalid setup key' });
     }
-
     const existing = await User.findOne({ role: 'super_admin' });
     if (existing) return res.status(400).json({ success: false, message: 'Super admin already exists for this org' });
-
-    // Create org first
     const org = await Organization.create({ name: orgName || 'My Company' });
-
-    // Create super admin
     const hashed = await bcrypt.hash(password, 10);
     const superAdmin = await User.create({
       name, email: email.toLowerCase(), password: hashed,
       role: 'super_admin', status: 'approved', orgId: org._id,
     });
-
-    // Link org to super admin
     org.superAdminId = superAdmin._id;
     await org.save();
-
     return res.json({
       success: true,
       message: `Super Admin created for "${orgName}"`,

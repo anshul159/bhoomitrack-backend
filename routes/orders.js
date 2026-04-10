@@ -17,6 +17,22 @@ router.post('/request', auth, async (req, res) => {
   }
 });
 
+// ─── GET /api/orders ──────────────────────────────────────────────────────────
+// All orders (for owner dashboard summary)
+router.get('/', auth, async (req, res) => {
+  try {
+    const orders = await Order.find().sort({ createdAt: -1 }).limit(200);
+    const data = orders.map(o => ({
+      id: o._id, material_name: o.material_name, quantity: o.quantity, unit: o.unit,
+      site_name: o.site_name, status: o.status, requested_by: o.requested_by,
+      created_at: o.createdAt, reason: o.reason,
+    }));
+    return res.json({ success: true, message: 'OK', data });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── GET /api/orders/:site ────────────────────────────────────────────────────
 router.get('/:site', auth, async (req, res) => {
   try {
