@@ -40,15 +40,19 @@ router.post('/create', auth, async (req, res) => {
     const site = await Site.create({ name, location: location || '', owner_id: req.user.id, materials: materials || [] });
 
     // Auto-create inventory items for each material
+    // materials can be: ['Cement', 'Sand'] OR [{name, quantity, unit}]
     if (materials && materials.length > 0) {
-      const inventoryItems = materials.map(m => ({
-        name: m,
-        quantity: 0,
-        unit: 'units',
-        site_name: name,
-        category: 'Building Items',
-        low_stock_threshold: 50,
-      }));
+      const inventoryItems = materials.map(m => {
+        const isObj = typeof m === 'object' && m !== null;
+        return {
+          name: isObj ? m.name : m,
+          quantity: isObj && m.quantity != null ? Number(m.quantity) : 0,
+          unit: isObj && m.unit ? m.unit : 'units',
+          site_name: name,
+          category: 'Building Items',
+          low_stock_threshold: 50,
+        };
+      });
       await Inventory.insertMany(inventoryItems);
     }
 

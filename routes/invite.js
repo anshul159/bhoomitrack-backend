@@ -115,11 +115,14 @@ router.post('/register', async (req, res) => {
 
     const hashed = await bcrypt.hash(password, 10);
 
+    // Managers start as 'pending' so owner must approve; owners start approved
+    const initialStatus = invite.role === 'manager' ? 'pending' : 'approved';
+
     const user = await User.create({
 
       name, email: email ? email.toLowerCase() : '', phone: phone || '',
 
-      password: hashed, role: invite.role, status: 'approved', orgId: invite.orgId,
+      password: hashed, role: invite.role, status: initialStatus, orgId: invite.orgId,
 
     });
 
@@ -129,19 +132,31 @@ router.post('/register', async (req, res) => {
 
     const token = makeToken(user);
 
+    console.log(`[REGISTER] ${invite.role} "${name}" registered via invite. Status: ${initialStatus}`);
+
     return res.json({
 
-      success: true, message: 'Account created successfully', token,
-
-      user: { id: user._id, name: user.name, email: user.email, phone: user.phone, role: user.role, approved: true, orgId: user.orgId }
+      success: true,
+      message: invite.role === 'manager' ? 'Account created. Awaiting owner approval.' : 'Account created successfully.',
+      token,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email || '',
+        phone: user.phone || '',
+        role: user.role,
+        site_name: user.site_name || '',
+        approved: user.status === 'approved',
+        status: user.status,
+      }
 
     });
 
   } catch (err) {
 
-    console.error(err);
+    console.error('[REGISTER ERROR]', err);
 
-    res.status(500).json({ success: false, message: 'Server error' });
+    res.status(500).json({ success: false, message: err.message || 'Server error' });
 
   }
 
