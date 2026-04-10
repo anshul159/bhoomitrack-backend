@@ -70,6 +70,23 @@ router.post('/login', async (req, res) => {
   }
 });
 
+// ─── POST /api/users/manager-login ───────────────────────────────────────────
+router.post('/manager-login', async (req, res) => {
+  try {
+    const { phone, password } = req.body;
+    if (!phone || !password) return res.status(400).json({ success: false, message: 'Phone and password required' });
+    const user = await User.findOne({ phone, role: 'manager' });
+    if (!user) return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
+    if (!user.password) return res.status(401).json({ success: false, message: 'No password set. Please register via invite code.' });
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
+    return res.json(userToResponse(user, makeToken(user)));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── POST /api/users/otp/send ─────────────────────────────────────────────────
 // Generate real 6-digit OTP, store in user, log to console for testing
 router.post('/otp/send', async (req, res) => {
