@@ -37,7 +37,9 @@ router.post('/create', auth, async (req, res) => {
     const existing = await Site.findOne({ name });
     if (existing) return res.status(400).json({ success: false, message: 'Site with this name already exists' });
 
-    const site = await Site.create({ name, location: location || '', owner_id: req.user.id, materials: materials || [] });
+    // Site model stores material names only (quantities live in Inventory collection)
+    const materialNames = (materials || []).map(m => (typeof m === 'object' && m !== null) ? m.name : m);
+    const site = await Site.create({ name, location: location || '', owner_id: req.user.id, materials: materialNames });
 
     // Auto-create inventory items for each material
     // materials can be: ['Cement', 'Sand'] OR [{name, quantity, unit}]
