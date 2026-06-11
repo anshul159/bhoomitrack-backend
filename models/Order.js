@@ -11,4 +11,7 @@ const orderSchema = new mongoose.Schema({
   reason: { type: String, default: '' },
 }, { timestamps: true });
 
+orderSchema.index({ site_name: 1, createdAt: -1 });
+orderSchema.index({ status: 1, createdAt: -1 });
+
 module.exports = mongoose.model('Order', orderSchema);

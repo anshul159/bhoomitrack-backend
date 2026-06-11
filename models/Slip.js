@@ -16,4 +16,8 @@ const slipSchema = new mongoose.Schema({
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
 }, { timestamps: true });
 
+// Indexes for site history, pending queue, and analytics date-range queries
+slipSchema.index({ site_name: 1, createdAt: -1 });
+slipSchema.index({ status: 1, createdAt: -1 });
+
 module.exports = mongoose.model('Slip', slipSchema);

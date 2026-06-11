@@ -13,4 +13,9 @@ const userSchema = new mongoose.Schema({
   otpExpiry: { type: Date, default: null },
 }, { timestamps: true });
 
+// Sparse-style lookups used by login / approval flows
+userSchema.index({ phone: 1 });
+userSchema.index({ email: 1 });
+userSchema.index({ role: 1, status: 1, site_name: 1 });
+
 module.exports = mongoose.model('User', userSchema);
