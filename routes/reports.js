@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const auth = require('../middleware/auth');
 const { ownerOnly } = require('../middleware/roles');
 const Slip = require('../models/Slip');
@@ -28,10 +29,15 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
     const site = req.query.site && req.query.site !== 'All Sites' ? String(req.query.site) : null;
     const since = days > 0 ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : null;
 
+    // Convert orgId string to ObjectId for use in aggregation $match stages
+    const orgOid = new mongoose.Types.ObjectId(req.user.orgId);
+
     const rangeMatch = since ? { createdAt: { $gte: since } } : {};
     const siteMatch = site ? { site_name: site } : {};
-    const slipMatchAll = { ...rangeMatch, ...siteMatch };                       // slips, any status
+    const orgMatch = { orgId: orgOid };
+    const slipMatchAll = { ...rangeMatch, ...siteMatch, ...orgMatch };          // slips, any status
     const slipMatchApproved = { ...slipMatchAll, status: 'approved' };          // consumption = approved only
+    const orderMatchAll = { ...rangeMatch, ...siteMatch, ...orgMatch };
 
     const [
       inventory,
@@ -46,8 +52,8 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
       oldestSlip,
     ] = await Promise.all([
 
-      // Inventory for the scope (health + forecast)
-      Inventory.find(siteMatch).lean(),
+      // Inventory for the scope (health + forecast) — scoped to this org
+      Inventory.find({ ...siteMatch, orgId: req.user.orgId }).lean(),
 
       // 1. Top consumed materials
       Slip.aggregate([
@@ -107,7 +113,7 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
 
       // 5. Order stats by status
       Order.aggregate([
-        { $match: slipMatchAll },
+        { $match: orderMatchAll },
         { $group: { _id: '$status', count: { $sum: 1 } } },
       ]),
 
@@ -128,9 +134,9 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
         { $project: { _id: 0, manager_name: '$_id', slips: 1, approved: 1, rejected: 1, quantity_taken: 1 } },
       ]),
 
-      // 7a. Site comparison — slip activity per site (all sites, range only)
+      // 7a. Site comparison — slip activity per site (all sites, range only, scoped to this org)
       site ? Promise.resolve([]) : Slip.aggregate([
-        { $match: rangeMatch },
+        { $match: { ...rangeMatch, ...orgMatch } },
         {
           $group: {
             _id: '$site_name',
@@ -145,8 +151,9 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
         { $sort: { quantity_consumed: -1 } },
       ]),
 
-      // 7b. Site comparison — low stock per site
+      // 7b. Site comparison — low stock per site (scoped to this org)
       site ? Promise.resolve([]) : Inventory.aggregate([
+        { $match: orgMatch },
         {
           $group: {
             _id: '$site_name',

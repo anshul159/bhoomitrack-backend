@@ -39,8 +39,8 @@ router.post('/send', auth, async (req, res) => {
     if (!isObjectId(receiver_id)) return res.status(400).json({ success: false, message: 'Invalid receiver' });
     if (!isNonEmptyString(message, 2000)) return res.status(400).json({ success: false, message: 'Message must be 1–2000 characters' });
 
-    // Receiver must be a real user
-    const receiver = await User.exists({ _id: receiver_id });
+    // Receiver must be a real user in the same org
+    const receiver = await User.exists({ _id: receiver_id, orgId: req.user.orgId });
     if (!receiver) return res.status(404).json({ success: false, message: 'Receiver not found' });
 
     await Chat.create({ sender_id: req.user.id, sender_name: req.user.name, receiver_id, message: message.trim() });

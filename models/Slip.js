@@ -14,6 +14,7 @@ const slipSchema = new mongoose.Schema({
   manager_name: { type: String, default: '' },
   items: [slipItemSchema],
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
 }, { timestamps: true });
 
 // Indexes for site history, pending queue, and analytics date-range queries

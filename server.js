@@ -59,14 +59,20 @@ app.use([
 ], authLimiter);
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
+const auth = require('./middleware/auth');
+const requireOrgId = require('./middleware/requireOrgId');
+// orgGuard = verify JWT + ensure the user belongs to an org (data isolation guard)
+const orgGuard = [auth, requireOrgId];
+
 app.use('/api/users',     require('./routes/users'));
 app.use('/api/invite',    require('./routes/invite'));
-app.use('/api/sites',     require('./routes/sites'));
-app.use('/api/inventory', require('./routes/inventory'));
-app.use('/api/orders',    require('./routes/orders'));
-app.use('/api/slips',     require('./routes/slips'));
-app.use('/api/chat',      require('./routes/chat'));
-app.use('/api/reports',   require('./routes/reports'));
+// All data routes require a valid JWT AND an orgId (protects against cross-org data leakage)
+app.use('/api/sites',     ...orgGuard, require('./routes/sites'));
+app.use('/api/inventory', ...orgGuard, require('./routes/inventory'));
+app.use('/api/orders',    ...orgGuard, require('./routes/orders'));
+app.use('/api/slips',     ...orgGuard, require('./routes/slips'));
+app.use('/api/chat',      ...orgGuard, require('./routes/chat'));
+app.use('/api/reports',   ...orgGuard, require('./routes/reports'));
 
 // ─── HEALTH CHECK ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {

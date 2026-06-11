@@ -215,10 +215,10 @@ router.get('/owner', auth, async (req, res) => {
 });
 
 // ─── GET /api/users/managers ──────────────────────────────────────────────────
-// Owner only: list all approved managers
+// Owner only: list all approved managers in this org
 router.get('/managers', auth, ownerOnly, async (req, res) => {
   try {
-    const managers = await User.find({ role: 'manager', status: 'approved' }).sort({ name: 1 }).lean();
+    const managers = await User.find({ role: 'manager', status: 'approved', orgId: req.user.orgId }).sort({ name: 1 }).lean();
     const data = managers.map(m => ({
       id: m._id,
       name: m.name,
@@ -232,10 +232,10 @@ router.get('/managers', auth, ownerOnly, async (req, res) => {
 });
 
 // ─── GET /api/users/pending ───────────────────────────────────────────────────
-// Owner only: managers awaiting approval
+// Owner only: managers awaiting approval in this org
 router.get('/pending', auth, ownerOnly, async (req, res) => {
   try {
-    const managers = await User.find({ role: 'manager', status: 'pending' }).sort({ createdAt: -1 }).lean();
+    const managers = await User.find({ role: 'manager', status: 'pending', orgId: req.user.orgId }).sort({ createdAt: -1 }).lean();
     const data = managers.map(m => ({
       id: m._id,
       name: m.name,
@@ -277,6 +277,8 @@ router.post('/approve', auth, ownerOnly, async (req, res) => {
     const update = {
       status: approve ? 'approved' : 'rejected',
       ...(approve && siteName ? { site_name: siteName } : {}),
+      // Assign manager to this owner's org when approving
+      ...(approve ? { orgId: req.user.orgId } : {}),
     };
     const user = await User.findOneAndUpdate({ _id: userId, role: 'manager' }, update, { new: true });
     if (!user) return res.status(404).json({ success: false, message: 'User not found' });

@@ -38,8 +38,9 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
     }
 
     // PERFORMANCE FIX: batch-fetch inventory instead of one query per item
+    // SECURITY FIX: only fetch inventory belonging to this org
     const ids = items.map(i => i.inventory_id);
-    const invDocs = await Inventory.find({ _id: { $in: ids } }).lean();
+    const invDocs = await Inventory.find({ _id: { $in: ids }, orgId: req.user.orgId }).lean();
     const invMap = Object.fromEntries(invDocs.map(d => [d._id.toString(), d]));
 
     const slipItems = [];
@@ -70,6 +71,7 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
       manager_name: req.user.name,
       items: slipItems,
       status: 'pending',
+      orgId: req.user.orgId,
     });
 
     return res.json({ success: true, message: 'Slip generated and awaiting owner approval', data: formatSlip(slip) });
@@ -80,11 +82,11 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
 });
 
 // ─── GET /api/slips/pending ───────────────────────────────────────────────────
-// Owner only: get all pending slips across all sites
+// Owner only: get all pending slips across all sites (scoped to this org)
 // NOTE: must stay declared BEFORE GET /:site or Express matches "pending" as a site
 router.get('/pending', auth, ownerOnly, async (req, res) => {
   try {
-    const slips = await Slip.find({ status: 'pending' }).sort({ createdAt: -1 }).lean();
+    const slips = await Slip.find({ status: 'pending', orgId: req.user.orgId }).sort({ createdAt: -1 }).lean();
     return res.json({ success: true, message: 'OK', data: slips.map(formatSlip) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -99,8 +101,9 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
 
     // CONCURRENCY FIX: atomically claim the slip (pending → approved) so two
     // simultaneous approvals can never deduct inventory twice.
+    // SECURITY FIX: include orgId so owners can only approve their own org's slips
     const slip = await Slip.findOneAndUpdate(
-      { _id: req.params.id, status: 'pending' },
+      { _id: req.params.id, status: 'pending', orgId: req.user.orgId },
       { status: 'approved' },
       { new: true }
     );
@@ -115,7 +118,7 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
       .filter(item => item.inventory_id && isPositiveNumber(Number(item.quantity_taken)))
       .map(item => ({
         updateOne: {
-          filter: { _id: item.inventory_id },
+          filter: { _id: item.inventory_id, orgId: req.user.orgId },
           update: [{
             $set: {
               quantity: {
@@ -128,7 +131,7 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
     if (ops.length > 0) await Inventory.bulkWrite(ops);
 
     // Refresh updated_stock on the slip items so the record reflects reality
-    const invDocs = await Inventory.find({ _id: { $in: slip.items.map(i => i.inventory_id) } }, 'quantity').lean();
+    const invDocs = await Inventory.find({ _id: { $in: slip.items.map(i => i.inventory_id) }, orgId: req.user.orgId }, 'quantity').lean();
     const qtyMap = Object.fromEntries(invDocs.map(d => [d._id.toString(), d.quantity]));
     slip.items.forEach(item => {
       const q = qtyMap[item.inventory_id?.toString()];
@@ -149,7 +152,7 @@ router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid slip id' });
     const slip = await Slip.findOneAndUpdate(
-      { _id: req.params.id, status: 'pending' },
+      { _id: req.params.id, status: 'pending', orgId: req.user.orgId },
       { status: 'rejected' },
       { new: true }
     );
@@ -169,7 +172,7 @@ router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
 // NOTE: declared before /:site so "last" never matches as a site name
 router.get('/last/:site', auth, async (req, res) => {
   try {
-    const slip = await Slip.findOne({ site_name: req.params.site }).sort({ createdAt: -1 }).lean();
+    const slip = await Slip.findOne({ site_name: req.params.site, orgId: req.user.orgId }).sort({ createdAt: -1 }).lean();
     if (!slip) return res.json({ success: false, message: 'No slips found', data: null });
     return res.json({ success: true, message: 'OK', data: formatSlip(slip) });
   } catch (err) {
@@ -180,7 +183,7 @@ router.get('/last/:site', auth, async (req, res) => {
 // ─── GET /api/slips/:site ─────────────────────────────────────────────────────
 router.get('/:site', auth, async (req, res) => {
   try {
-    const slips = await Slip.find({ site_name: req.params.site }).sort({ createdAt: -1 }).limit(500).lean();
+    const slips = await Slip.find({ site_name: req.params.site, orgId: req.user.orgId }).sort({ createdAt: -1 }).limit(500).lean();
     return res.json({ success: true, message: 'OK', data: slips.map(formatSlip) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });

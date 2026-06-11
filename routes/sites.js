@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const mongoose = require('mongoose');
 const auth = require('../middleware/auth');
 const { ownerOnly } = require('../middleware/roles');
 const Site = require('../models/Site');
@@ -12,14 +13,15 @@ const { isNonEmptyString } = require('../utils/validate');
 // of how many sites exist, using aggregation pipelines.
 router.get('/', auth, async (req, res) => {
   try {
-    const sites = await Site.find().sort({ createdAt: -1 }).lean();
+    const orgId = req.user.orgId;
+    const sites = await Site.find({ orgId }).sort({ createdAt: -1 }).lean();
     if (sites.length === 0) return res.json({ success: true, message: 'OK', data: [] });
 
     const siteNames = sites.map(s => s.name);
 
     const [invAgg, mgrAgg] = await Promise.all([
       Inventory.aggregate([
-        { $match: { site_name: { $in: siteNames } } },
+        { $match: { orgId: new mongoose.Types.ObjectId(orgId), site_name: { $in: siteNames } } },
         {
           $group: {
             _id: '$site_name',
@@ -29,7 +31,7 @@ router.get('/', auth, async (req, res) => {
         }
       ]),
       User.aggregate([
-        { $match: { role: 'manager', status: 'approved', site_name: { $in: siteNames } } },
+        { $match: { role: 'manager', status: 'approved', site_name: { $in: siteNames }, orgId: new mongoose.Types.ObjectId(orgId) } },
         {
           $group: {
             _id: '$site_name',
@@ -76,14 +78,15 @@ router.post('/create', auth, ownerOnly, async (req, res) => {
       return res.status(400).json({ success: false, message: 'Invalid materials list' });
     }
 
-    const existing = await Site.findOne({ name });
+    const orgId = req.user.orgId;
+    const existing = await Site.findOne({ name, orgId });
     if (existing) return res.status(400).json({ success: false, message: 'Site with this name already exists' });
 
     // Site model stores material names only (quantities live in Inventory collection)
     const materialNames = (materials || [])
       .map(m => (typeof m === 'object' && m !== null) ? m.name : m)
       .filter(n => isNonEmptyString(n));
-    await Site.create({ name, location: location || '', owner_id: req.user.id, materials: materialNames });
+    await Site.create({ name, location: location || '', owner_id: req.user.id, materials: materialNames, orgId });
 
     // Auto-create inventory items for each material
     // materials can be: ['Cement', 'Sand'] OR [{name, quantity, unit}]
@@ -100,6 +103,7 @@ router.post('/create', auth, ownerOnly, async (req, res) => {
             site_name: name,
             category: 'Building Items',
             low_stock_threshold: 50,
+            orgId,
           };
         });
       if (inventoryItems.length > 0) await Inventory.insertMany(inventoryItems);

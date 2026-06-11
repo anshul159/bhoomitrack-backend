@@ -29,6 +29,7 @@ router.post('/request', auth, requireApproved, async (req, res) => {
       reason: typeof reason === 'string' ? reason.slice(0, 500) : '',
       requested_by: req.user.name,
       requested_by_id: req.user.id,
+      orgId: req.user.orgId,
     });
     return res.json({ success: true, message: 'Order requested' });
   } catch (err) {
@@ -38,10 +39,10 @@ router.post('/request', auth, requireApproved, async (req, res) => {
 });
 
 // ─── GET /api/orders ──────────────────────────────────────────────────────────
-// All orders (for owner dashboard summary)
+// All orders for this org (owner dashboard summary)
 router.get('/', auth, async (req, res) => {
   try {
-    const orders = await Order.find().sort({ createdAt: -1 }).limit(200).lean();
+    const orders = await Order.find({ orgId: req.user.orgId }).sort({ createdAt: -1 }).limit(200).lean();
     return res.json({ success: true, message: 'OK', data: orders.map(orderToResponse) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -51,7 +52,7 @@ router.get('/', auth, async (req, res) => {
 // ─── GET /api/orders/:site ────────────────────────────────────────────────────
 router.get('/:site', auth, async (req, res) => {
   try {
-    const orders = await Order.find({ site_name: req.params.site }).sort({ createdAt: -1 }).limit(500).lean();
+    const orders = await Order.find({ site_name: req.params.site, orgId: req.user.orgId }).sort({ createdAt: -1 }).limit(500).lean();
     return res.json({ success: true, message: 'OK', data: orders.map(orderToResponse) });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -64,7 +65,7 @@ router.put('/accept/:id', auth, ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid order id' });
     const order = await Order.findOneAndUpdate(
-      { _id: req.params.id, status: 'pending' },
+      { _id: req.params.id, status: 'pending', orgId: req.user.orgId },
       { status: 'accepted' },
       { new: true }
     );
@@ -85,7 +86,7 @@ router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid order id' });
     const order = await Order.findOneAndUpdate(
-      { _id: req.params.id, status: 'pending' },
+      { _id: req.params.id, status: 'pending', orgId: req.user.orgId },
       { status: 'rejected' },
       { new: true }
     );
