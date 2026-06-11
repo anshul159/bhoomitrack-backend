@@ -53,6 +53,7 @@ app.use([
   '/api/users/forgot-password',
   '/api/users/reset-password',
   '/api/users/setup-super-admin',
+  '/api/users/register-company',
   '/api/invite/verify',
   '/api/invite/register',
 ], authLimiter);

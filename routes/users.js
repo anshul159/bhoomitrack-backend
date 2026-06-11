@@ -322,4 +322,37 @@ router.post('/setup-super-admin', async (req, res) => {
   }
 });
 
+// ─── POST /api/users/register-company ────────────────────────────────────────
+// Public — any company can self-register. Creates an Organisation + super_admin.
+router.post('/register-company', async (req, res) => {
+  try {
+    const { name, email, password, companyName } = req.body;
+    if (!name || !email || !password || !companyName) {
+      return res.status(400).json({ success: false, message: 'Company name, your name, email and password are all required' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    }
+    const existing = await User.findOne({ email: email.toLowerCase() });
+    if (existing) {
+      return res.status(400).json({ success: false, message: 'An account with this email already exists' });
+    }
+    const org = await Organization.create({ name: companyName });
+    const hashed = await bcrypt.hash(password, 10);
+    const superAdmin = await User.create({
+      name, email: email.toLowerCase(), password: hashed,
+      role: 'super_admin', status: 'approved', orgId: org._id,
+    });
+    org.superAdminId = superAdmin._id;
+    await org.save();
+    return res.json({
+      ...userToResponse(superAdmin, makeToken(superAdmin)),
+      message: `Welcome to BhoomiTrack! Your company "${companyName}" is ready.`,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 module.exports = router;
