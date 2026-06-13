@@ -231,6 +231,49 @@ router.get('/managers', auth, ownerOnly, async (req, res) => {
   }
 });
 
+// ─── GET /api/users/managers-by-site/:siteName ────────────────────────────────
+// Owner only: list all approved managers assigned to a specific site in this org
+router.get('/managers-by-site/:siteName', auth, ownerOnly, async (req, res) => {
+  try {
+    const { siteName } = req.params;
+    const managers = await User.find({
+      role: 'manager',
+      status: 'approved',
+      site_name: siteName,
+      orgId: req.user.orgId
+    }).sort({ name: 1 }).lean();
+    const data = managers.map(m => ({
+      id: m._id,
+      name: m.name,
+      phone: m.phone || '',
+      site_name: m.site_name || '',
+    }));
+    return res.json({ success: true, message: 'OK', data });
+  } catch (err) {
+    console.error('[MANAGERS-BY-SITE ERROR]', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── PUT /api/users/remove-from-site/:userId ─────────────────────────────────
+// Owner only: unassign a manager from their current site (sets site_name to '')
+router.put('/remove-from-site/:userId', auth, ownerOnly, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const user = await User.findOneAndUpdate(
+      { _id: userId, role: 'manager', orgId: req.user.orgId },
+      { site_name: '' },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ success: false, message: 'Manager not found' });
+    console.log(`[REMOVE-FROM-SITE] ${user.name} (${user._id}) removed from site by owner ${req.user.id}`);
+    return res.json({ success: true, message: `${user.name} removed from site` });
+  } catch (err) {
+    console.error('[REMOVE-FROM-SITE ERROR]', err);
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── GET /api/users/pending ───────────────────────────────────────────────────
 // Owner only: managers awaiting approval in this org
 router.get('/pending', auth, ownerOnly, async (req, res) => {
