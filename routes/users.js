@@ -235,7 +235,14 @@ router.get('/managers', auth, ownerOnly, async (req, res) => {
 // Owner only: managers awaiting approval in this org
 router.get('/pending', auth, ownerOnly, async (req, res) => {
   try {
-    const managers = await User.find({ role: 'manager', status: 'pending', orgId: req.user.orgId }).sort({ createdAt: -1 }).lean();
+    const orgId = req.user.orgId;
+    if (!orgId) {
+      // Token is missing orgId even after the auth-middleware fallback — tell the client.
+      console.warn(`[PENDING] orgId missing for user ${req.user.id} — client should re-login`);
+      return res.status(400).json({ success: false, message: 'Session is outdated. Please log out and log back in.' });
+    }
+    const managers = await User.find({ role: 'manager', status: 'pending', orgId }).sort({ createdAt: -1 }).lean();
+    console.log(`[PENDING] orgId=${orgId} → found ${managers.length} pending manager(s)`);
     const data = managers.map(m => ({
       id: m._id,
       name: m.name,
@@ -245,6 +252,7 @@ router.get('/pending', auth, ownerOnly, async (req, res) => {
     }));
     return res.json({ success: true, message: 'OK', data });
   } catch (err) {
+    console.error('[PENDING ERROR]', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

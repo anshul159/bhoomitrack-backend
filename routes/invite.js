@@ -19,16 +19,24 @@ async function generateUniqueCode() {
 }
 
 // ─── POST /api/invite/generate ────────────────────────────────────────────────
-// super_admin → owner invite, owner → manager invite
+// owner → manager invite only
+// super_admin → owner invite by default, OR manager invite if body contains { role: 'manager' }
 router.post('/generate', auth, async (req, res) => {
   try {
     const sender = await User.findById(req.user.id);
     if (!sender) return res.status(403).json({ success: false, message: 'User not found' });
 
     let inviteRole;
-    if (sender.role === 'super_admin') inviteRole = 'owner';
-    else if (sender.role === 'owner') inviteRole = 'manager';
-    else return res.status(403).json({ success: false, message: 'Only Super Admins and Owners can generate invite codes' });
+    if (sender.role === 'super_admin') {
+      // super_admin can generate either owner or manager invites
+      const requested = req.body?.role;
+      if (requested === 'manager') inviteRole = 'manager';
+      else inviteRole = 'owner'; // default for super_admin
+    } else if (sender.role === 'owner') {
+      inviteRole = 'manager';
+    } else {
+      return res.status(403).json({ success: false, message: 'Only Super Admins and Owners can generate invite codes' });
+    }
 
     const code = await generateUniqueCode();
 
@@ -62,6 +70,8 @@ router.post('/verify', async (req, res) => {
 
 // ─── POST /api/invite/register ────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
+  // Declared outside try so the catch block can release it on unexpected errors
+  let invite = null;
   try {
     const { code, name, email, password, phone } = req.body;
     if (!isNonEmptyString(code, 10) || !isNonEmptyString(name) || !isNonEmptyString(password, 100)) {
@@ -70,7 +80,7 @@ router.post('/register', async (req, res) => {
     if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
 
     // Atomically consume the invite so the same code can't be redeemed twice concurrently
-    const invite = await Invite.findOneAndUpdate(
+    invite = await Invite.findOneAndUpdate(
       { code, used: false, expiresAt: { $gt: new Date() } },
       { used: true },
       { new: true }
@@ -119,7 +129,9 @@ router.post('/register', async (req, res) => {
     });
   } catch (err) {
     console.error('[REGISTER ERROR]', err);
-    res.status(500).json({ success: false, message: 'Server error' });
+    // Release the invite so the user can retry with the same code
+    if (invite) { try { invite.used = false; await invite.save(); } catch (_) { /* noop */ } }
+    res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 });
 
