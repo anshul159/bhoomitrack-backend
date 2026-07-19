@@ -59,6 +59,7 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
       slipLastBySite,
       orderLastBySite,
       allSites,
+      trendPrevAgg,
     ] = await Promise.all([
 
       // Inventory for the scope (health + forecast) — scoped to this org
@@ -241,6 +242,23 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
 
       // 16. All sites in org (complete list for stalled detection)
       Site.find({ orgId: req.user.orgId }).select('name').lean(),
+
+      // 17. Previous-period consumption total (drives "up/down N% vs last period" on the trend report)
+      days > 0 ? Slip.aggregate([
+        {
+          $match: {
+            ...siteMatch,
+            ...orgMatch,
+            status: 'approved',
+            createdAt: {
+              $gte: new Date(Date.now() - 2 * days * 24 * 60 * 60 * 1000),
+              $lt: new Date(Date.now() - days * 24 * 60 * 60 * 1000),
+            },
+          }
+        },
+        { $unwind: '$items' },
+        { $group: { _id: null, total: { $sum: '$items.quantity_taken' } } },
+      ]) : Promise.resolve(null),
     ]);
 
     // ── Inventory health ────────────────────────────────────────────────────
@@ -455,10 +473,13 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
     // ── KPI summary (always-visible strip) ───────────────────────────────────
     const stockoutRiskCount = allForecast.filter(i => i.status === 'critical' || i.status === 'out').length;
     const idleStockCount = idleStock.length;
-    const pendingApprovalsTotal = (inventory.length > 0 ? 0 : 0) + // placeholder init
-      // slip pending + order pending — already computed above
-      (slipPending || 0) + (ordPending || 0);
+    const pendingApprovalsTotal = slipPending + ordPending;
     const totalConsumption = topConsumed.reduce((s, c) => s + c.total_taken, 0);
+
+    // ── Previous-period trend total (for WoW/period-over-period comparison) ──
+    const trendPreviousTotal = days > 0
+      ? Math.round(((trendPrevAgg && trendPrevAgg[0]?.total) || 0) * 100) / 100
+      : null;
 
     // ── Site comparison assembly ────────────────────────────────────────────
     const invBySite = Object.fromEntries(siteCmpInv.map(s => [s._id, s]));
@@ -524,6 +545,7 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
             .map(i => ({ material_name: i.name, site_name: i.site_name, quantity: i.quantity, unit: i.unit })),
           burn_rate: burnRateItems,               // WoW change per material/site
           trend: trend,                           // daily totals chart
+          trend_previous_total: trendPreviousTotal, // prior equal-length period total (days>0 only; null otherwise)
           site_comparison: siteComparison,        // per-site efficiency
         },
 
