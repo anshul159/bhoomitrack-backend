@@ -7,7 +7,7 @@ module.exports = (req, res, next) => {
 
     // Handle "Bearer <token>" or just "<token>"
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader;
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'bhoomitrack_secret');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     req.user = decoded;
     next();
   } catch (err) {

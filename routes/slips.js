@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const { requireRole } = require('../middleware/roles');
 const Slip = require('../models/Slip');
 const Inventory = require('../models/Inventory');
 
@@ -55,7 +56,7 @@ router.post('/generate', auth, async (req, res) => {
 
 // ─── GET /api/slips/pending ───────────────────────────────────────────────────
 // Owner: get all pending slips across all sites
-router.get('/pending', auth, async (req, res) => {
+router.get('/pending', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const slips = await Slip.find({ status: 'pending' }).sort({ createdAt: -1 });
     return res.json({ success: true, message: 'OK', data: slips.map(formatSlip) });
@@ -66,7 +67,7 @@ router.get('/pending', auth, async (req, res) => {
 
 // ─── PUT /api/slips/approve/:id ───────────────────────────────────────────────
 // Owner: approve a pending slip — deducts inventory NOW
-router.put('/approve/:id', auth, async (req, res) => {
+router.put('/approve/:id', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const slip = await Slip.findById(req.params.id);
     if (!slip) return res.status(404).json({ success: false, message: 'Slip not found' });
@@ -93,7 +94,7 @@ router.put('/approve/:id', auth, async (req, res) => {
 
 // ─── PUT /api/slips/reject/:id ────────────────────────────────────────────────
 // Owner: reject a pending slip — no inventory change
-router.put('/reject/:id', auth, async (req, res) => {
+router.put('/reject/:id', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const slip = await Slip.findById(req.params.id);
     if (!slip) return res.status(404).json({ success: false, message: 'Slip not found' });

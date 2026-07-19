@@ -1,12 +1,13 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const { requireRole } = require('../middleware/roles');
 const Site = require('../models/Site');
 const Inventory = require('../models/Inventory');
 const User = require('../models/User');
 
 // ─── GET /api/sites ───────────────────────────────────────────────────────────
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const sites = await Site.find().sort({ createdAt: -1 });
     const data = await Promise.all(sites.map(async (s) => {
@@ -33,7 +34,7 @@ router.get('/', auth, async (req, res) => {
 });
 
 // ─── POST /api/sites/create ───────────────────────────────────────────────────
-router.post('/create', auth, async (req, res) => {
+router.post('/create', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const { name, location, materials } = req.body;
     if (!name) return res.status(400).json({ success: false, message: 'Site name required' });

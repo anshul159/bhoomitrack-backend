@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
+const { requireRole } = require('../middleware/roles');
 const Inventory = require('../models/Inventory');
 
 // ─── GET /api/inventory/:site ─────────────────────────────────────────────────
@@ -18,7 +19,7 @@ router.get('/:site', auth, async (req, res) => {
 });
 
 // ─── POST /api/inventory/add ──────────────────────────────────────────────────
-router.post('/add', auth, async (req, res) => {
+router.post('/add', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const { name, quantity, unit, site_name, category, low_stock_threshold } = req.body;
     const item = await Inventory.create({ name, quantity, unit, site_name, category, low_stock_threshold });
@@ -32,7 +33,7 @@ router.post('/add', auth, async (req, res) => {
 });
 
 // ─── PUT /api/inventory/update/:id ───────────────────────────────────────────
-router.put('/update/:id', auth, async (req, res) => {
+router.put('/update/:id', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const { quantity } = req.body;
     const item = await Inventory.findByIdAndUpdate(req.params.id, { quantity }, { new: true });
@@ -47,7 +48,7 @@ router.put('/update/:id', auth, async (req, res) => {
 });
 
 // ─── DELETE /api/inventory/delete/:id ────────────────────────────────────────
-router.delete('/delete/:id', auth, async (req, res) => {
+router.delete('/delete/:id', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     await Inventory.findByIdAndDelete(req.params.id);
     return res.json({ success: true, message: 'Item deleted' });

@@ -32,6 +32,11 @@ if (!MONGO_URI) {
   process.exit(1);
 }
 
+if (!process.env.JWT_SECRET) {
+  console.error('❌ JWT_SECRET not set in environment variables — refusing to start with an insecure default');
+  process.exit(1);
+}
+
 mongoose.connect(MONGO_URI)
   .then(() => {
     console.log('✅ Connected to MongoDB');

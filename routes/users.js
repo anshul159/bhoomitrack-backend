@@ -5,10 +5,11 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Organization = require('../models/Organization');
 const auth = require('../middleware/auth');
+const { requireRole } = require('../middleware/roles');
 
 const makeToken = (user) => jwt.sign(
   { id: user._id, role: user.role, name: user.name, orgId: user.orgId },
-  process.env.JWT_SECRET || 'bhoomitrack_secret',
+  process.env.JWT_SECRET,
   { expiresIn: '30d' }
 );
 
@@ -31,15 +32,11 @@ const userToResponse = (user, token) => ({
 // ─── POST /api/users/signup ───────────────────────────────────────────────────
 router.post('/signup', async (req, res) => {
   try {
-    const { name, phone, email, password, role, site } = req.body;
+    const { name, phone, role, site } = req.body;
 
+    // Owner accounts can only be created via the invite flow (/api/invite/register).
     if (role === 'owner') {
-      if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password required' });
-      const existing = await User.findOne({ email: email.toLowerCase() });
-      if (existing) return res.status(400).json({ success: false, message: 'Email already registered' });
-      const hashed = await bcrypt.hash(password, 10);
-      const owner = await User.create({ name, email: email.toLowerCase(), password: hashed, role: 'owner', status: 'approved' });
-      return res.json(userToResponse(owner, makeToken(owner)));
+      return res.status(403).json({ success: false, message: 'Owner accounts require an invite code. Please register via your invite.' });
     }
 
     // Manager signup
@@ -205,7 +202,7 @@ router.get('/owner', auth, async (req, res) => {
 
 // ─── GET /api/users/managers ──────────────────────────────────────────────────
 // Owner: list all approved managers
-router.get('/managers', auth, async (req, res) => {
+router.get('/managers', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const managers = await User.find({ role: 'manager', status: 'approved' }).sort({ name: 1 });
     const data = managers.map(m => ({
@@ -221,7 +218,7 @@ router.get('/managers', auth, async (req, res) => {
 });
 
 // ─── GET /api/users/pending ───────────────────────────────────────────────────
-router.get('/pending', auth, async (req, res) => {
+router.get('/pending', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const managers = await User.find({ role: 'manager', status: 'pending' }).sort({ createdAt: -1 });
     const data = managers.map(m => ({
@@ -241,13 +238,15 @@ router.get('/pending', auth, async (req, res) => {
 router.get('/check-phone/:phone', async (req, res) => {
   try {
     const user = await User.findOne({ phone: req.params.phone, role: 'manager' });
+    // SECURITY: never return a token or full user object from this unauthenticated
+    // endpoint — login must go through OTP verification.
     return res.json({
       success: true,
       exists: !!user,
       status: user?.status || null,
       site_name: user?.site_name || '',
       name: user?.name || '',
-      user: user ? userToResponse(user, makeToken(user)).user : null
+      user: null
     });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
@@ -255,7 +254,7 @@ router.get('/check-phone/:phone', async (req, res) => {
 });
 
 // ─── POST /api/users/approve ──────────────────────────────────────────────────
-router.post('/approve', auth, async (req, res) => {
+router.post('/approve', auth, requireRole('owner', 'super_admin'), async (req, res) => {
   try {
     const { userId, approve, siteName } = req.body;
     const update = {
@@ -274,7 +273,8 @@ router.post('/approve', auth, async (req, res) => {
 router.post('/setup-super-admin', async (req, res) => {
   try {
     const { setupKey, name, email, password, orgName } = req.body;
-    if (setupKey !== (process.env.SETUP_KEY || 'bhoomitrack_setup_2024')) {
+    // SECURITY: setup route is disabled unless SETUP_KEY is explicitly configured.
+    if (!process.env.SETUP_KEY || setupKey !== process.env.SETUP_KEY) {
       return res.status(403).json({ success: false, message: 'Invalid setup key' });
     }
     const existing = await User.findOne({ role: 'super_admin' });
