@@ -10,4 +10,6 @@ const inviteSchema = new mongoose.Schema({
   expiresAt: { type: Date, default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) },
 }, { timestamps: true });
 
+inviteSchema.index({ code: 1, used: 1 });
+
 module.exports = mongoose.model('Invite', inviteSchema);

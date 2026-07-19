@@ -7,6 +7,10 @@ const inventorySchema = new mongoose.Schema({
   site_name: { type: String, required: true },
   category: { type: String, default: 'Building Items' },
   low_stock_threshold: { type: Number, default: 50 },
+  orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
 }, { timestamps: true });
+
+// Indexes for the hottest query patterns
+inventorySchema.index({ site_name: 1, name: 1 });
 
 module.exports = mongoose.model('Inventory', inventorySchema);
