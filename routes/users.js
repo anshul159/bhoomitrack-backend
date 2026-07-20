@@ -24,31 +24,6 @@ const userToResponse = (user, token) => ({
   }
 });
 
-// ─── POST /api/users/signup ───────────────────────────────────────────────────
-router.post('/signup', async (req, res) => {
-  try {
-    const { name, phone, role, site } = req.body;
-
-    // Owner accounts can only be created via the invite flow (/api/invite/register).
-    if (role === 'owner') {
-      return res.status(403).json({ success: false, message: 'Owner accounts require an invite code. Please register via your invite.' });
-    }
-
-    // Manager signup — account starts as 'pending'. No token is issued until the
-    // manager is approved and logs in (issuing tokens to unapproved users was a security hole).
-    if (!isNonEmptyString(name) || !isNonEmptyString(phone, 20)) {
-      return res.status(400).json({ success: false, message: 'Name and phone required' });
-    }
-    const existing = await User.findOne({ phone });
-    if (existing) return res.status(400).json({ success: false, message: 'Phone already registered' });
-    const manager = await User.create({ name, phone, role: 'manager', status: 'pending', site_name: site || '' });
-    return res.json(userToResponse(manager, null));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
 // ─── POST /api/users/login ────────────────────────────────────────────────────
 router.post('/login', async (req, res) => {
   try {
@@ -79,51 +54,6 @@ router.post('/manager-login', async (req, res) => {
     if (!user.password) return res.status(401).json({ success: false, message: 'No password set. Please register via invite code.' });
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
-    return res.json(userToResponse(user, makeToken(user)));
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ─── POST /api/users/otp/send ─────────────────────────────────────────────────
-// Generate real 6-digit OTP, store in user, log to console for testing
-router.post('/otp/send', async (req, res) => {
-  try {
-    const { phone } = req.body;
-    if (!isNonEmptyString(phone, 20)) return res.status(400).json({ success: false, message: 'Phone required' });
-    const user = await User.findOne({ phone, role: 'manager' });
-    if (!user) return res.json({ success: true, message: 'OK', exists: false, status: null });
-
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpExpiry = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-    await User.findByIdAndUpdate(user._id, { otp, otpExpiry });
-
-    // Log OTP to console (visible in Render logs)
-    console.log(`[OTP LOGIN] Phone: ${phone} | OTP: ${otp} | Expires: ${otpExpiry.toISOString()}`);
-
-    return res.json({ success: true, message: 'OTP sent', exists: true, status: user.status });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ─── POST /api/users/otp/verify ──────────────────────────────────────────────
-// Verify OTP and return manager data
-router.post('/otp/verify', async (req, res) => {
-  try {
-    const { phone, otp } = req.body;
-    if (!isNonEmptyString(phone, 20) || !isNonEmptyString(otp, 10)) {
-      return res.status(400).json({ success: false, message: 'Phone and OTP required' });
-    }
-    const user = await User.findOne({ phone, role: 'manager' });
-    if (!user) return res.status(404).json({ success: false, message: 'Manager not found' });
-    if (!user.otp || user.otp !== otp) return res.status(400).json({ success: false, message: 'Invalid OTP. Please check and try again.' });
-    if (user.otpExpiry && new Date() > user.otpExpiry) return res.status(400).json({ success: false, message: 'OTP expired. Please request a new one.' });
-
-    // Clear OTP after successful verification (single use)
-    await User.findByIdAndUpdate(user._id, { otp: null, otpExpiry: null });
     return res.json(userToResponse(user, makeToken(user)));
   } catch (err) {
     console.error(err);
@@ -289,71 +219,6 @@ router.put('/remove-from-site/:userId', auth, ownerOnly, async (req, res) => {
     return res.json({ success: true, message: `${user.name} removed from site` });
   } catch (err) {
     console.error('[REMOVE-FROM-SITE ERROR]', err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ─── GET /api/users/pending ───────────────────────────────────────────────────
-// Owner only: managers awaiting approval in this org
-router.get('/pending', auth, ownerOnly, async (req, res) => {
-  try {
-    const orgId = req.user.orgId;
-    if (!orgId) {
-      // Token is missing orgId even after the auth-middleware fallback — tell the client.
-      console.warn(`[PENDING] orgId missing for user ${req.user.id} — client should re-login`);
-      return res.status(400).json({ success: false, message: 'Session is outdated. Please log out and log back in.' });
-    }
-    const managers = await User.find({ role: 'manager', status: 'pending', orgId }).sort({ createdAt: -1 }).lean();
-    console.log(`[PENDING] orgId=${orgId} → found ${managers.length} pending manager(s)`);
-    const data = managers.map(m => ({
-      id: m._id,
-      name: m.name,
-      phone: m.phone,
-      site_name: m.site_name || 'Not assigned',
-      created_at: m.createdAt,
-    }));
-    return res.json({ success: true, message: 'OK', data });
-  } catch (err) {
-    console.error('[PENDING ERROR]', err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ─── GET /api/users/check-phone/:phone ───────────────────────────────────────
-// Public endpoint used during registration/login pre-checks.
-// SECURITY FIX: returns only existence + status now. It previously returned a
-// full auth token for any phone number, which let anyone impersonate a manager.
-router.get('/check-phone/:phone', async (req, res) => {
-  try {
-    const user = await User.findOne({ phone: req.params.phone, role: 'manager' }).lean();
-    return res.json({
-      success: true,
-      exists: !!user,
-      status: user?.status || null,
-      site_name: user?.site_name || '',
-      name: user?.name || '',
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
-// ─── POST /api/users/approve ──────────────────────────────────────────────────
-// Owner only: approve/reject a pending manager
-router.post('/approve', auth, ownerOnly, async (req, res) => {
-  try {
-    const { userId, approve, siteName } = req.body;
-    if (!isNonEmptyString(userId, 50)) return res.status(400).json({ success: false, message: 'userId required' });
-    const update = {
-      status: approve ? 'approved' : 'rejected',
-      ...(approve && siteName ? { site_name: siteName, assignedAt: new Date() } : {}),
-      // Assign manager to this owner's org when approving
-      ...(approve ? { orgId: req.user.orgId } : {}),
-    };
-    const user = await User.findOneAndUpdate({ _id: userId, role: 'manager' }, update, { new: true });
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    return res.json({ success: true, message: approve ? `${user.name} approved` : `${user.name} rejected` });
-  } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
