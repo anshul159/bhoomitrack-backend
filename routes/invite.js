@@ -12,7 +12,7 @@ const { isNonEmptyString } = require('../utils/validate');
 async function generateUniqueCode() {
   for (let attempt = 0; attempt < 5; attempt++) {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const clash = await Invite.exists({ code, used: false, expiresAt: { $gt: new Date() } });
+    const clash = await Invite.exists({ code, expiresAt: { $gt: new Date() } });
     if (!clash) return code;
   }
   throw new Error('Could not generate a unique invite code');
@@ -21,6 +21,13 @@ async function generateUniqueCode() {
 // ─── POST /api/invite/generate ────────────────────────────────────────────────
 // owner → manager invite only
 // super_admin → owner invite by default, OR manager invite if body contains { role: 'manager' }
+//
+// Invite codes are reusable by design (an owner shares ONE code with as many
+// managers as they're onboarding, valid for 7 days) — NOT single-use. By default
+// this returns the sender's existing still-valid code instead of minting a new
+// one, so re-opening the "Invite" screen doesn't silently invalidate a code
+// that's already been shared. Pass { force: true } to explicitly invalidate and
+// generate a fresh one (the "Generate New Code" button).
 router.post('/generate', auth, async (req, res) => {
   try {
     const sender = await User.findById(req.user.id);
@@ -38,13 +45,23 @@ router.post('/generate', auth, async (req, res) => {
       return res.status(403).json({ success: false, message: 'Only Super Admins and Owners can generate invite codes' });
     }
 
+    const force = req.body?.force === true;
+    const org = await Organization.findById(sender.orgId);
+
+    if (!force) {
+      const existing = await Invite.findOne({ invitedBy: sender._id, role: inviteRole, expiresAt: { $gt: new Date() } })
+        .sort({ createdAt: -1 });
+      if (existing) {
+        return res.json({ success: true, message: 'Invite code', code: existing.code, role: inviteRole, orgName: org?.name || 'BhoomiTrack', expiresIn: '7 days' });
+      }
+    }
+
     const code = await generateUniqueCode();
 
-    // One active invite per sender per role — invalidate previous unused codes
-    await Invite.deleteMany({ invitedBy: sender._id, used: false, role: inviteRole });
+    // Explicit regenerate (or no active code exists) — clear out old codes for this role
+    await Invite.deleteMany({ invitedBy: sender._id, role: inviteRole });
     await Invite.create({ email: '', code, role: inviteRole, orgId: sender.orgId, invitedBy: sender._id });
 
-    const org = await Organization.findById(sender.orgId);
     return res.json({ success: true, message: 'Invite code generated', code, role: inviteRole, orgName: org?.name || 'BhoomiTrack', expiresIn: '7 days' });
   } catch (err) {
     console.error(err);
@@ -58,7 +75,7 @@ router.post('/verify', async (req, res) => {
     const { code } = req.body;
     if (!isNonEmptyString(code, 10)) return res.status(400).json({ success: false, message: 'Code is required' });
 
-    const invite = await Invite.findOne({ code, used: false, expiresAt: { $gt: new Date() } });
+    const invite = await Invite.findOne({ code, expiresAt: { $gt: new Date() } });
     if (!invite) return res.status(400).json({ success: false, message: 'Invalid or expired invite code' });
 
     const org = await Organization.findById(invite.orgId);
@@ -70,8 +87,6 @@ router.post('/verify', async (req, res) => {
 
 // ─── POST /api/invite/register ────────────────────────────────────────────────
 router.post('/register', async (req, res) => {
-  // Declared outside try so the catch block can release it on unexpected errors
-  let invite = null;
   try {
     const { code, name, email, password, phone } = req.body;
     if (!isNonEmptyString(code, 10) || !isNonEmptyString(name) || !isNonEmptyString(password, 100)) {
@@ -79,24 +94,18 @@ router.post('/register', async (req, res) => {
     }
     if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
 
-    // Atomically consume the invite so the same code can't be redeemed twice concurrently
-    invite = await Invite.findOneAndUpdate(
-      { code, used: false, expiresAt: { $gt: new Date() } },
-      { used: true },
-      { new: true }
-    );
+    // Codes are reusable until expiry — not consumed on registration, so the same
+    // code can onboard multiple managers (see /generate comment above).
+    const invite = await Invite.findOne({ code, expiresAt: { $gt: new Date() } });
     if (!invite) return res.status(400).json({ success: false, message: 'Invalid or expired invite code' });
-
-    // Helper to release the invite if registration fails validation below
-    const releaseInvite = async () => { try { invite.used = false; await invite.save(); } catch (_) { /* noop */ } };
 
     if (email) {
       const existing = await User.findOne({ email: email.toLowerCase() });
-      if (existing) { await releaseInvite(); return res.status(400).json({ success: false, message: 'Email already registered' }); }
+      if (existing) return res.status(400).json({ success: false, message: 'Email already registered' });
     }
     if (phone && invite.role === 'manager') {
       const existingPhone = await User.findOne({ phone });
-      if (existingPhone) { await releaseInvite(); return res.status(400).json({ success: false, message: 'Phone number already registered' }); }
+      if (existingPhone) return res.status(400).json({ success: false, message: 'Phone number already registered. Please log in instead.' });
     }
 
     const hashed = await bcrypt.hash(password, 10);
@@ -129,8 +138,6 @@ router.post('/register', async (req, res) => {
     });
   } catch (err) {
     console.error('[REGISTER ERROR]', err);
-    // Release the invite so the user can retry with the same code
-    if (invite) { try { invite.used = false; await invite.save(); } catch (_) { /* noop */ } }
     res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }
 });
