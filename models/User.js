@@ -8,6 +8,7 @@ const userSchema = new mongoose.Schema({
   role: { type: String, enum: ['super_admin', 'owner', 'manager'], default: 'manager' },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
   site_name: { type: String, default: '' },
+  assignedAt: { type: Date, default: null }, // when site_name was last set for a manager
   orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', default: null },
   otp: { type: String, default: null },
   otpExpiry: { type: Date, default: null },

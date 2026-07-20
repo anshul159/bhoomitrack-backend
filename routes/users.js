@@ -216,9 +216,36 @@ router.get('/managers', auth, ownerOnly, async (req, res) => {
       name: m.name,
       phone: m.phone || '',
       site_name: m.site_name || '',
+      created_at: m.createdAt,
+      assigned_at: m.assignedAt || null,
     }));
     return res.json({ success: true, message: 'OK', data });
   } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── PUT /api/users/assign-site/:userId ───────────────────────────────────────
+// Owner only: assign (or reassign) a site to an already-approved manager.
+// Separate from /approve — managers auto-approve on registration now (see
+// invite.js), so site assignment is its own step done from the
+// "Unassigned Managers" screen.
+router.put('/assign-site/:userId', auth, ownerOnly, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { siteName } = req.body;
+    if (!isNonEmptyString(siteName, 200)) return res.status(400).json({ success: false, message: 'siteName is required' });
+
+    const user = await User.findOneAndUpdate(
+      { _id: userId, role: 'manager', orgId: req.user.orgId },
+      { site_name: siteName, assignedAt: new Date() },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ success: false, message: 'Manager not found' });
+    console.log(`[ASSIGN-SITE] ${user.name} (${user._id}) assigned to ${siteName} by owner ${req.user.id}`);
+    return res.json({ success: true, message: `${user.name} assigned to ${siteName}` });
+  } catch (err) {
+    console.error('[ASSIGN-SITE ERROR]', err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -319,7 +346,7 @@ router.post('/approve', auth, ownerOnly, async (req, res) => {
     if (!isNonEmptyString(userId, 50)) return res.status(400).json({ success: false, message: 'userId required' });
     const update = {
       status: approve ? 'approved' : 'rejected',
-      ...(approve && siteName ? { site_name: siteName } : {}),
+      ...(approve && siteName ? { site_name: siteName, assignedAt: new Date() } : {}),
       // Assign manager to this owner's org when approving
       ...(approve ? { orgId: req.user.orgId } : {}),
     };

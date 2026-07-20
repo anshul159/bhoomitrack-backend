@@ -110,20 +110,22 @@ router.post('/register', async (req, res) => {
 
     const hashed = await bcrypt.hash(password, 10);
 
-    // Managers start as 'pending' so owner must approve; owners start approved
-    const initialStatus = invite.role === 'manager' ? 'pending' : 'approved';
-
+    // Knowing the invite code IS the approval — the owner already vetted who
+    // they shared it with, so there's no separate manual-approve step anymore.
+    // A manager lands approved but with no site yet; the owner assigns one
+    // afterward via PUT /api/users/assign-site/:userId (see the "Unassigned
+    // Managers" screen).
     const user = await User.create({
       name, email: email ? email.toLowerCase() : '', phone: phone || '',
-      password: hashed, role: invite.role, status: initialStatus, orgId: invite.orgId,
+      password: hashed, role: invite.role, status: 'approved', orgId: invite.orgId,
     });
 
     const token = makeToken(user);
-    console.log(`[REGISTER] ${invite.role} "${name}" registered via invite. Status: ${initialStatus}`);
+    console.log(`[REGISTER] ${invite.role} "${name}" registered via invite and auto-approved.`);
 
     return res.json({
       success: true,
-      message: invite.role === 'manager' ? 'Account created. Awaiting owner approval.' : 'Account created successfully.',
+      message: invite.role === 'manager' ? 'Account created! You will be assigned to a site shortly.' : 'Account created successfully.',
       token,
       user: {
         id: user._id,
