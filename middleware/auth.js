@@ -12,15 +12,17 @@ module.exports = async (req, res, next) => {
     const decoded = jwt.verify(token, JWT_SECRET);
     req.user = decoded;
 
-    // Old tokens (issued before orgId was added to makeToken) won't have orgId in the payload.
-    // Fall back to a DB lookup so every endpoint that uses req.user.orgId still works correctly.
-    if (!req.user.orgId) {
-      try {
-        const User = require('../models/User');
-        const user = await User.findById(decoded.id).select('orgId').lean();
-        if (user && user.orgId) req.user.orgId = user.orgId;
-      } catch (_) { /* non-fatal — endpoint handles missing orgId */ }
-    }
+    // Always resolve orgId fresh from the DB rather than trusting whatever's baked
+    // into the token. Tokens live for 30 days, and a user's orgId can change after
+    // theirs was issued (e.g. a legacy account backfilled with an orgId by a later
+    // migration) — trusting a stale token value here silently broke every org-scoped
+    // query (pending approvals, managers list, etc.) with an empty result instead of
+    // an error, since the query itself looked perfectly valid.
+    try {
+      const User = require('../models/User');
+      const user = await User.findById(decoded.id).select('orgId').lean();
+      if (user && user.orgId) req.user.orgId = user.orgId;
+    } catch (_) { /* non-fatal — endpoint handles missing orgId */ }
 
     next();
   } catch (err) {
