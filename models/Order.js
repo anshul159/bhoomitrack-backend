@@ -7,7 +7,6 @@ const orderSchema = new mongoose.Schema({
   site_name: { type: String, required: true },
   status: { type: String, enum: ['pending', 'accepted', 'rejected'], default: 'pending' },
   requested_by: { type: String, default: '' },
-  requested_by_id: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   reason: { type: String, default: '' },
   orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', index: true },
 }, { timestamps: true });

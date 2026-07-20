@@ -107,17 +107,6 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
-// ─── GET /api/users/profile ───────────────────────────────────────────────────
-router.get('/profile', auth, async (req, res) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ success: false, message: 'User not found' });
-    return res.json(userToResponse(user, null));
-  } catch (err) {
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
-});
-
 // ─── GET /api/users/owner ─────────────────────────────────────────────────────
 // Manager: get the owner/super_admin for their org
 router.get('/owner', auth, async (req, res) => {

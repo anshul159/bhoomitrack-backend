@@ -60,7 +60,7 @@ router.post('/generate', auth, async (req, res) => {
 
     // Explicit regenerate (or no active code exists) — clear out old codes for this role
     await Invite.deleteMany({ invitedBy: sender._id, role: inviteRole });
-    await Invite.create({ email: '', code, role: inviteRole, orgId: sender.orgId, invitedBy: sender._id });
+    await Invite.create({ code, role: inviteRole, orgId: sender.orgId, invitedBy: sender._id });
 
     return res.json({ success: true, message: 'Invite code generated', code, role: inviteRole, orgName: org?.name || 'BhoomiTrack', expiresIn: '7 days' });
   } catch (err) {

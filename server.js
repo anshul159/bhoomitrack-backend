@@ -49,7 +49,6 @@ app.use('/api', apiLimiter);
 app.use([
   '/api/users/login',
   '/api/users/manager-login',
-  '/api/users/otp',
   '/api/users/forgot-password',
   '/api/users/reset-password',
   '/api/users/setup-super-admin',

@@ -11,7 +11,6 @@ const requireRole = (...roles) => (req, res, next) => {
 
 // Convenience guards
 const ownerOnly = requireRole('owner', 'super_admin');
-const anyUser = requireRole('owner', 'super_admin', 'manager');
 
 // Managers must be APPROVED before performing write actions (slips, orders).
 // Tokens are issued at registration (the app needs them for the pending-approval
@@ -30,4 +29,4 @@ const requireApproved = async (req, res, next) => {
   }
 };
 
-module.exports = { requireRole, ownerOnly, anyUser, requireApproved };
+module.exports = { requireRole, ownerOnly, requireApproved };

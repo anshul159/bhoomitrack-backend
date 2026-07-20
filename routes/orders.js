@@ -1,41 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
-const { ownerOnly, requireApproved } = require('../middleware/roles');
+const { ownerOnly } = require('../middleware/roles');
 const Order = require('../models/Order');
-const { isNonEmptyString, isPositiveNumber, isObjectId } = require('../utils/validate');
+const { isObjectId } = require('../utils/validate');
 
 const orderToResponse = (o) => ({
   id: o._id, material_name: o.material_name, quantity: o.quantity, unit: o.unit,
   site_name: o.site_name, status: o.status, requested_by: o.requested_by,
   created_at: o.createdAt, reason: o.reason,
-});
-
-// ─── POST /api/orders/request ─────────────────────────────────────────────────
-router.post('/request', auth, requireApproved, async (req, res) => {
-  try {
-    const { material_name, quantity, unit, site_name, reason } = req.body;
-    if (!isNonEmptyString(material_name) || !isNonEmptyString(site_name)) {
-      return res.status(400).json({ success: false, message: 'Material and site are required' });
-    }
-    const qty = Number(quantity);
-    if (!isPositiveNumber(qty)) return res.status(400).json({ success: false, message: 'Quantity must be greater than 0' });
-
-    await Order.create({
-      material_name: material_name.trim(),
-      quantity: qty,
-      unit: isNonEmptyString(unit, 30) ? unit : 'units',
-      site_name,
-      reason: typeof reason === 'string' ? reason.slice(0, 500) : '',
-      requested_by: req.user.name,
-      requested_by_id: req.user.id,
-      orgId: req.user.orgId,
-    });
-    return res.json({ success: true, message: 'Order requested' });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ success: false, message: 'Server error' });
-  }
 });
 
 // ─── GET /api/orders ──────────────────────────────────────────────────────────
