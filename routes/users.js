@@ -125,6 +125,21 @@ router.get('/owner', auth, async (req, res) => {
   }
 });
 
+// ─── PUT /api/users/fcm-token ─────────────────────────────────────────────────
+// Registers/updates the caller's current device push token. Called on login and
+// whenever Firebase rotates the token. One token per user (last device wins) —
+// fine for this app's single-device-per-person usage pattern.
+router.put('/fcm-token', auth, async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!isNonEmptyString(token, 500)) return res.status(400).json({ success: false, message: 'Token is required' });
+    await User.findByIdAndUpdate(req.user.id, { fcmToken: token });
+    return res.json({ success: true, message: 'Token registered' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── GET /api/users/managers ──────────────────────────────────────────────────
 // Owner only: list all approved managers in this org
 router.get('/managers', auth, ownerOnly, async (req, res) => {

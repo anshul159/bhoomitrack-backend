@@ -12,6 +12,7 @@ const userSchema = new mongoose.Schema({
   orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', default: null },
   otp: { type: String, default: null },
   otpExpiry: { type: Date, default: null },
+  fcmToken: { type: String, default: '' }, // current device's push token, for owner/manager notifications
 }, { timestamps: true });
 
 // Sparse-style lookups used by login / approval flows

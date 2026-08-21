@@ -4,7 +4,9 @@ const auth = require('../middleware/auth');
 const { ownerOnly, requireApproved } = require('../middleware/roles');
 const Slip = require('../models/Slip');
 const Inventory = require('../models/Inventory');
+const User = require('../models/User');
 const { isNonEmptyString, isPositiveNumber, isObjectId } = require('../utils/validate');
+const { sendToUsers } = require('../utils/push');
 
 // Helper to format slip for API response
 function formatSlip(slip) {
@@ -50,6 +52,13 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
       // INTEGRITY FIX: an item must belong to the slip's site
       if (inv.site_name !== site_name) continue;
       const qty = Number(item.quantity_taken);
+      // STOCK FIX: can't take more than what's actually on hand
+      if (qty > inv.quantity) {
+        return res.status(400).json({
+          success: false,
+          message: `Only ${inv.quantity} ${inv.unit} of ${inv.name} in stock — can't take ${qty}`,
+        });
+      }
       // Pre-compute what the stock would be after approval (for display only)
       const projectedStock = Math.max(0, inv.quantity - qty);
       slipItems.push({
@@ -73,6 +82,17 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
       status: 'pending',
       orgId: req.user.orgId,
     });
+
+    // Notify the org's owner(s) — don't let a push failure affect the response
+    User.find({ orgId: req.user.orgId, role: { $in: ['owner', 'super_admin'] } }, 'fcmToken')
+      .lean()
+      .then((owners) => sendToUsers(
+        owners,
+        'New slip awaiting approval',
+        `${req.user.name} submitted a slip at ${site_name}`,
+        { type: 'slip_pending', slipId: String(slip._id), siteName: site_name }
+      ))
+      .catch(() => {});
 
     return res.json({ success: true, message: 'Slip generated and awaiting owner approval', data: formatSlip(slip) });
   } catch (err) {
@@ -139,6 +159,16 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
     });
     await slip.save();
 
+    User.findById(slip.manager_id, 'fcmToken')
+      .lean()
+      .then((manager) => manager && sendToUsers(
+        [manager],
+        'Slip approved',
+        `Your slip at ${slip.site_name} was approved — inventory updated`,
+        { type: 'slip_approved', slipId: String(slip._id), siteName: slip.site_name }
+      ))
+      .catch(() => {});
+
     return res.json({ success: true, message: 'Slip approved and inventory updated', data: formatSlip(slip) });
   } catch (err) {
     console.error(err);
@@ -161,6 +191,16 @@ router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
       if (!existing) return res.status(404).json({ success: false, message: 'Slip not found' });
       return res.status(400).json({ success: false, message: `Slip is already ${existing.status}` });
     }
+
+    User.findById(slip.manager_id, 'fcmToken')
+      .lean()
+      .then((manager) => manager && sendToUsers(
+        [manager],
+        'Slip rejected',
+        `Your slip at ${slip.site_name} was rejected`,
+        { type: 'slip_rejected', slipId: String(slip._id), siteName: slip.site_name }
+      ))
+      .catch(() => {});
 
     return res.json({ success: true, message: 'Slip rejected', data: formatSlip(slip) });
   } catch (err) {
