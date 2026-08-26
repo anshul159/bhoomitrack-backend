@@ -7,6 +7,7 @@ const Slip = require('../models/Slip');
 const Order = require('../models/Order');
 const Inventory = require('../models/Inventory');
 const Site = require('../models/Site');
+const { resolveSite, siteFilter } = require('../utils/site');
 
 // ─── GET /api/reports/analytics ───────────────────────────────────────────────
 // Owner only. Construction-inventory analytics computed server-side.
@@ -34,7 +35,18 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
     const orgOid = new mongoose.Types.ObjectId(req.user.orgId);
 
     const rangeMatch = since ? { createdAt: { $gte: since } } : {};
-    const siteMatch = site ? { site_name: site } : {};
+
+    // Match on site_id where a record has one, falling back to the denormalised
+    // site_name for rows written before the id migration (ENH-007). Accepts a
+    // site id or a site name in the query string.
+    let scopedSite = null;
+    if (site) {
+      scopedSite = await resolveSite(site, req.user.orgId);
+      if (!scopedSite) {
+        return res.status(404).json({ success: false, message: 'Site not found' });
+      }
+    }
+    const siteMatch = scopedSite ? siteFilter(scopedSite) : {};
     const orgMatch = { orgId: orgOid };
     const slipMatchAll = { ...rangeMatch, ...siteMatch, ...orgMatch };          // slips, any status
     const slipMatchApproved = { ...slipMatchAll, status: 'approved' };          // consumption = approved only
@@ -265,6 +277,23 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
     const inStock = inventory.filter(i => i.quantity >= i.low_stock_threshold).length;
     const lowStock = inventory.filter(i => i.quantity > 0 && i.quantity < i.low_stock_threshold).length;
     const outOfStock = inventory.filter(i => i.quantity <= 0).length;
+
+    // ── Value on hand (ENH-017) ─────────────────────────────────────────────
+    // Only priced materials contribute. `unpriced_materials` is reported
+    // alongside so an owner can tell a low total from an incomplete one — a
+    // figure that silently treats unpriced stock as free is worse than none.
+    const pricedInventory = inventory.filter(i => typeof i.unit_cost === 'number');
+    const stockValue = pricedInventory.reduce((sum, i) => sum + i.quantity * i.unit_cost, 0);
+
+    // Consumption in money terms, from the cost each slip captured at the time
+    // it was raised — so a later price change cannot restate past consumption.
+    const consumptionValueAgg = await Slip.aggregate([
+      { $match: slipMatchApproved },
+      { $unwind: '$items' },
+      { $match: { 'items.line_total': { $ne: null } } },
+      { $group: { _id: null, total: { $sum: '$items.line_total' } } },
+    ]);
+    const consumptionValue = consumptionValueAgg[0]?.total || 0;
 
     // ── Stock runway forecast ───────────────────────────────────────────────
     // period over which consumption was observed (for daily averages)
@@ -509,7 +538,7 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
       success: true,
       message: 'OK',
       data: {
-        site: site || 'All Sites',
+        site: scopedSite ? scopedSite.name : 'All Sites',
         period_days: periodDays,
 
         // ── Always-visible KPI strip ────────────────────────────────────────
@@ -526,6 +555,18 @@ router.get('/analytics', auth, ownerOnly, async (req, res) => {
           in_stock: inStock,
           low_stock: lowStock,
           out_of_stock: outOfStock,
+        },
+
+        // ── Value (ENH-017) ─────────────────────────────────────────────────
+        // `unpriced_materials` is the honesty field: a total computed over only
+        // some of the stock has to say so, or an owner reads a low number as
+        // good news rather than as missing prices.
+        value: {
+          currency: req.org?.currency || 'INR',
+          stock_on_hand: Math.round(stockValue * 100) / 100,
+          consumption: Math.round(consumptionValue * 100) / 100,
+          priced_materials: pricedInventory.length,
+          unpriced_materials: inventory.length - pricedInventory.length,
         },
 
         // ── TAB 1: Cross-site stock intelligence ───────────────────────────

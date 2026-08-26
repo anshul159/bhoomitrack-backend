@@ -33,32 +33,70 @@ function getApp() {
   return app;
 }
 
-// Sends to one or more device tokens. Silently drops empty/invalid tokens and
-// any token Firebase reports as no-longer-registered (uninstalled app, etc.) —
-// callers don't need to know or care about delivery mechanics.
+// Firebase reports these when a token belongs to an app that has been uninstalled
+// or whose token was replaced. Such tokens are dead forever and get pruned.
+const DEAD_TOKEN_CODES = new Set([
+  'messaging/registration-token-not-registered',
+  'messaging/invalid-registration-token',
+  'messaging/invalid-argument',
+]);
+
+/**
+ * Sends to one or more device tokens.
+ * @returns {Promise<string[]>} tokens Firebase reported as permanently dead.
+ */
 async function sendToTokens(tokens, title, body, data = {}) {
   const firebaseApp = getApp();
-  const validTokens = (tokens || []).filter((t) => typeof t === 'string' && t.length > 0);
-  if (!firebaseApp || validTokens.length === 0) return;
+  const validTokens = [...new Set((tokens || []).filter((t) => typeof t === 'string' && t.length > 0))];
+  if (!firebaseApp || validTokens.length === 0) return [];
 
   try {
-    await admin.messaging(firebaseApp).sendEachForMulticast({
+    const res = await admin.messaging(firebaseApp).sendEachForMulticast({
       tokens: validTokens,
       notification: { title, body },
       data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])),
       android: { priority: 'high' },
     });
+
+    const dead = [];
+    res.responses.forEach((r, i) => {
+      if (!r.success && DEAD_TOKEN_CODES.has(r.error?.code)) dead.push(validTokens[i]);
+    });
+    return dead;
   } catch (err) {
     console.error('[PUSH] Send failed:', err.message);
+    return [];
   }
 }
 
-// Looks up users by id, collects their fcmToken, and sends. `userDocsOrIds` can
-// be either already-fetched user docs (with .fcmToken) or plain ids — pass docs
-// when the caller already has them to avoid a redundant query.
+/**
+ * Sends to every device each user has registered (ENH-014), then prunes the
+ * tokens Firebase says are dead so the list does not grow forever.
+ *
+ * `users` may be lean docs or full documents; both `fcmTokens` (current) and the
+ * legacy single `fcmToken` string are read, so a user who has not logged in since
+ * the migration still receives push.
+ */
 async function sendToUsers(users, title, body, data = {}) {
-  const tokens = users.map((u) => u.fcmToken).filter(Boolean);
-  await sendToTokens(tokens, title, body, data);
+  const list = users || [];
+  const tokens = [];
+  for (const u of list) {
+    if (Array.isArray(u?.fcmTokens)) tokens.push(...u.fcmTokens.map((t) => t.token).filter(Boolean));
+    if (u?.fcmToken) tokens.push(u.fcmToken); // legacy field, pre-migration rows
+  }
+
+  const dead = await sendToTokens(tokens, title, body, data);
+  if (dead.length > 0) {
+    try {
+      const User = require('../models/User');
+      await User.updateMany(
+        { _id: { $in: list.map((u) => u._id).filter(Boolean) } },
+        { $pull: { fcmTokens: { token: { $in: dead } } } }
+      );
+    } catch (err) {
+      console.error('[PUSH] Failed to prune dead tokens:', err.message);
+    }
+  }
 }
 
 module.exports = { sendToTokens, sendToUsers };

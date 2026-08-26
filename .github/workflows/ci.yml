@@ -1,0 +1,42 @@
+name: CI
+
+# Deployment is `git push` and Render deploys whatever arrives (ENH-011). This
+# runs first, so a commit that cannot pass its own tests is visible before it is
+# serving customers.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check every file parses
+        run: |
+          # Cheap guard against the failure that used to reach production
+          # directly: a syntax error in a file no test happens to require.
+          find . -name '*.js' -not -path './node_modules/*' -print0 \
+            | xargs -0 -n1 node --check
+
+      - name: Run tests
+        run: npm test
+        env:
+          CI: true
+
+      - name: Audit dependencies
+        # Advisory only — a new advisory against a transitive dependency should
+        # be visible without blocking an unrelated deploy.
+        run: npm audit --audit-level=high || true

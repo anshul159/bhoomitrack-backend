@@ -2,22 +2,36 @@ const express = require('express');
 const router = express.Router();
 const auth = require('../middleware/auth');
 const { ownerOnly, requireApproved } = require('../middleware/roles');
+const siteAccess = require('../middleware/siteAccess');
 const Slip = require('../models/Slip');
 const Inventory = require('../models/Inventory');
 const User = require('../models/User');
+const { resolveSite, siteFilter } = require('../utils/site');
+const { parsePaging, paginate } = require('../utils/pagination');
+const audit = require('../utils/audit');
 const { isNonEmptyString, isPositiveNumber, isObjectId } = require('../utils/validate');
 const { sendToUsers } = require('../utils/push');
 
-// Helper to format slip for API response
 function formatSlip(slip) {
   return {
     id: slip._id,
+    site_id: slip.site_id || null,
     site_name: slip.site_name,
     manager_id: slip.manager_id,
     manager_name: slip.manager_name,
-    items: slip.items,
+    items: (slip.items || []).map((i) => ({
+      material_name: i.material_name,
+      quantity_taken: i.quantity_taken,
+      unit: i.unit,
+      updated_stock: i.updated_stock,
+      inventory_id: i.inventory_id,
+      unit_cost: i.unit_cost ?? null,
+      line_total: i.line_total ?? null,
+    })),
     status: slip.status,
+    total_value: slip.total_value ?? null,
     created_at: slip.createdAt,
+    decided_at: slip.decided_at || null,
   };
 }
 
@@ -27,7 +41,6 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
   try {
     const { site_name, items } = req.body;
 
-    // Validation: a slip must target a real site and contain at least one valid item
     if (!isNonEmptyString(site_name)) return res.status(400).json({ success: false, message: 'Site name required' });
     if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
       return res.status(400).json({ success: false, message: 'Slip must contain between 1 and 100 items' });
@@ -39,8 +52,21 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
       }
     }
 
-    // PERFORMANCE FIX: batch-fetch inventory instead of one query per item
-    // SECURITY FIX: only fetch inventory belonging to this org
+    const site = await resolveSite(site_name, req.user.orgId);
+    if (!site) return res.status(404).json({ success: false, message: 'Site not found' });
+
+    // A manager may only draw against a site they actually hold. The item/site
+    // check below already blocked taking another site's stock, but the slip
+    // itself could still be filed against the wrong site (ENH-024, BR-011).
+    if (req.user.role === 'manager') {
+      const assigned = (req.user.site_ids || []).includes(String(site._id)) ||
+        req.user.site_name === site.name;
+      if (!assigned) {
+        return res.status(403).json({ success: false, message: 'You are not assigned to this site' });
+      }
+    }
+
+    // Batch-fetch inventory, scoped to this org, instead of one query per item.
     const ids = items.map(i => i.inventory_id);
     const invDocs = await Inventory.find({ _id: { $in: ids }, orgId: req.user.orgId }).lean();
     const invMap = Object.fromEntries(invDocs.map(d => [d._id.toString(), d]));
@@ -49,24 +75,33 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
     for (const item of items) {
       const inv = invMap[item.inventory_id.toString()];
       if (!inv) continue;
-      // INTEGRITY FIX: an item must belong to the slip's site
-      if (inv.site_name !== site_name) continue;
+      // INTEGRITY: an item must belong to the slip's site. Compare on id where
+      // both sides have one, falling back to name for rows not yet migrated.
+      const sameSite = inv.site_id
+        ? String(inv.site_id) === String(site._id)
+        : inv.site_name === site.name;
+      if (!sameSite) continue;
+
       const qty = Number(item.quantity_taken);
-      // STOCK FIX: can't take more than what's actually on hand
+      // Can't take more than what's actually on hand.
       if (qty > inv.quantity) {
         return res.status(400).json({
           success: false,
           message: `Only ${inv.quantity} ${inv.unit} of ${inv.name} in stock — can't take ${qty}`,
         });
       }
-      // Pre-compute what the stock would be after approval (for display only)
-      const projectedStock = Math.max(0, inv.quantity - qty);
+
+      // Cost is captured now, not read back at approval time, so a later price
+      // change cannot rewrite what this slip was worth (ENH-017).
+      const unitCost = inv.unit_cost ?? null;
       slipItems.push({
         material_name: inv.name,
         quantity_taken: qty,
         unit: inv.unit,
-        updated_stock: projectedStock,   // informational only until approved
+        updated_stock: Math.max(0, inv.quantity - qty), // informational until approved
         inventory_id: inv._id,
+        unit_cost: unitCost,
+        line_total: unitCost != null ? Number((unitCost * qty).toFixed(2)) : null,
       });
     }
 
@@ -74,23 +109,41 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
       return res.status(400).json({ success: false, message: 'No valid materials found for this site' });
     }
 
+    // Null when nothing on the slip is priced — a slip of unpriced materials is
+    // worth "unknown", not zero.
+    const priced = slipItems.filter((i) => i.line_total != null);
+    const totalValue = priced.length > 0
+      ? Number(priced.reduce((sum, i) => sum + i.line_total, 0).toFixed(2))
+      : null;
+
     const slip = await Slip.create({
-      site_name,
+      site_id: site._id,
+      site_name: site.name,
       manager_id: req.user.id,
       manager_name: req.user.name,
       items: slipItems,
       status: 'pending',
+      total_value: totalValue,
       orgId: req.user.orgId,
     });
 
-    // Notify the org's owner(s) — don't let a push failure affect the response
-    User.find({ orgId: req.user.orgId, role: { $in: ['owner', 'super_admin'] } }, 'fcmToken')
+    audit.record(req, {
+      action: 'slip.generate',
+      entity: 'slip',
+      entity_id: slip._id,
+      entity_label: `${slipItems.length} item(s)`,
+      site_id: site._id,
+      site_name: site.name,
+      after: { status: 'pending', total_value: totalValue },
+    });
+
+    User.find({ orgId: req.user.orgId, role: { $in: ['owner', 'super_admin'] } }, 'fcmTokens fcmToken')
       .lean()
       .then((owners) => sendToUsers(
         owners,
         'New slip awaiting approval',
-        `${req.user.name} submitted a slip at ${site_name}`,
-        { type: 'slip_pending', slipId: String(slip._id), siteName: site_name }
+        `${req.user.name} submitted a slip at ${site.name}`,
+        { type: 'slip_pending', slipId: String(slip._id), siteName: site.name }
       ))
       .catch(() => {});
 
@@ -102,12 +155,14 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
 });
 
 // ─── GET /api/slips/pending ───────────────────────────────────────────────────
-// Owner only: get all pending slips across all sites (scoped to this org)
+// Owner only: pending slips across all sites in this org.
 // NOTE: must stay declared BEFORE GET /:site or Express matches "pending" as a site
 router.get('/pending', auth, ownerOnly, async (req, res) => {
   try {
-    const slips = await Slip.find({ status: 'pending', orgId: req.user.orgId }).sort({ createdAt: -1 }).lean();
-    return res.json({ success: true, message: 'OK', data: slips.map(formatSlip) });
+    const paging = parsePaging(req.query, { defaultLimit: 200 });
+    const filter = { status: 'pending', orgId: req.user.orgId };
+    const result = await paginate(Slip, filter, paging, { createdAt: -1 }, formatSlip);
+    return res.json({ success: true, message: 'OK', ...result });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -119,16 +174,16 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid slip id' });
 
-    // CONCURRENCY FIX: atomically claim the slip (pending → approved) so two
-    // simultaneous approvals can never deduct inventory twice.
-    // SECURITY FIX: include orgId so owners can only approve their own org's slips
+    // Atomically claim the slip (pending → approved) so two simultaneous
+    // approvals can never deduct inventory twice, and scope by orgId so an owner
+    // can only approve their own organisation's slips.
     const slip = await Slip.findOneAndUpdate(
       { _id: req.params.id, status: 'pending', orgId: req.user.orgId },
-      { status: 'approved' },
+      { status: 'approved', decided_by: req.user.id, decided_at: new Date() },
       { new: true }
     );
     if (!slip) {
-      const existing = await Slip.findById(req.params.id).lean();
+      const existing = await Slip.findOne({ _id: req.params.id, orgId: req.user.orgId }).lean();
       if (!existing) return res.status(404).json({ success: false, message: 'Slip not found' });
       return res.status(400).json({ success: false, message: `Slip is already ${existing.status}` });
     }
@@ -151,7 +206,10 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
     if (ops.length > 0) await Inventory.bulkWrite(ops);
 
     // Refresh updated_stock on the slip items so the record reflects reality
-    const invDocs = await Inventory.find({ _id: { $in: slip.items.map(i => i.inventory_id) }, orgId: req.user.orgId }, 'quantity').lean();
+    const invDocs = await Inventory.find(
+      { _id: { $in: slip.items.map(i => i.inventory_id) }, orgId: req.user.orgId },
+      'quantity'
+    ).lean();
     const qtyMap = Object.fromEntries(invDocs.map(d => [d._id.toString(), d.quantity]));
     slip.items.forEach(item => {
       const q = qtyMap[item.inventory_id?.toString()];
@@ -159,7 +217,18 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
     });
     await slip.save();
 
-    User.findById(slip.manager_id, 'fcmToken')
+    audit.record(req, {
+      action: 'slip.approve',
+      entity: 'slip',
+      entity_id: slip._id,
+      entity_label: `${slip.items.length} item(s)`,
+      site_id: slip.site_id,
+      site_name: slip.site_name,
+      before: { status: 'pending' },
+      after: { status: 'approved', total_value: slip.total_value },
+    });
+
+    User.findById(slip.manager_id, 'fcmTokens fcmToken')
       .lean()
       .then((manager) => manager && sendToUsers(
         [manager],
@@ -183,16 +252,27 @@ router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid slip id' });
     const slip = await Slip.findOneAndUpdate(
       { _id: req.params.id, status: 'pending', orgId: req.user.orgId },
-      { status: 'rejected' },
+      { status: 'rejected', decided_by: req.user.id, decided_at: new Date() },
       { new: true }
     );
     if (!slip) {
-      const existing = await Slip.findById(req.params.id).lean();
+      const existing = await Slip.findOne({ _id: req.params.id, orgId: req.user.orgId }).lean();
       if (!existing) return res.status(404).json({ success: false, message: 'Slip not found' });
       return res.status(400).json({ success: false, message: `Slip is already ${existing.status}` });
     }
 
-    User.findById(slip.manager_id, 'fcmToken')
+    audit.record(req, {
+      action: 'slip.reject',
+      entity: 'slip',
+      entity_id: slip._id,
+      entity_label: `${slip.items.length} item(s)`,
+      site_id: slip.site_id,
+      site_name: slip.site_name,
+      before: { status: 'pending' },
+      after: { status: 'rejected' },
+    });
+
+    User.findById(slip.manager_id, 'fcmTokens fcmToken')
       .lean()
       .then((manager) => manager && sendToUsers(
         [manager],
@@ -210,9 +290,14 @@ router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
 
 // ─── GET /api/slips/last/:site ────────────────────────────────────────────────
 // NOTE: declared before /:site so "last" never matches as a site name
-router.get('/last/:site', auth, async (req, res) => {
+router.get('/last/:site', auth, siteAccess, async (req, res) => {
   try {
-    const slip = await Slip.findOne({ site_name: req.params.site, orgId: req.user.orgId }).sort({ createdAt: -1 }).lean();
+    const filter = { orgId: req.user.orgId, ...siteFilter(req.site) };
+    // A manager asking for "my last slip" means theirs, not the site's most
+    // recent by anyone — otherwise the screen shows a colleague's slip.
+    if (req.user.role === 'manager') filter.manager_id = req.user.id;
+
+    const slip = await Slip.findOne(filter).sort({ createdAt: -1 }).lean();
     if (!slip) return res.json({ success: false, message: 'No slips found', data: null });
     return res.json({ success: true, message: 'OK', data: formatSlip(slip) });
   } catch (err) {
@@ -221,10 +306,13 @@ router.get('/last/:site', auth, async (req, res) => {
 });
 
 // ─── GET /api/slips/:site ─────────────────────────────────────────────────────
-router.get('/:site', auth, async (req, res) => {
+router.get('/:site', auth, siteAccess, async (req, res) => {
   try {
-    const slips = await Slip.find({ site_name: req.params.site, orgId: req.user.orgId }).sort({ createdAt: -1 }).limit(500).lean();
-    return res.json({ success: true, message: 'OK', data: slips.map(formatSlip) });
+    const paging = parsePaging(req.query, { defaultLimit: 500 });
+    const filter = { orgId: req.user.orgId, ...siteFilter(req.site) };
+    if (isNonEmptyString(req.query.status, 20)) filter.status = req.query.status;
+    const result = await paginate(Slip, filter, paging, { createdAt: -1 }, formatSlip);
+    return res.json({ success: true, message: 'OK', ...result });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }

@@ -7,6 +7,7 @@ const Invite = require('../models/Invite');
 const Organization = require('../models/Organization');
 const { makeToken } = require('../utils/token');
 const { isNonEmptyString } = require('../utils/validate');
+const { validatePassword } = require('../utils/password');
 
 // Generate a 6-digit code that doesn't collide with another active invite
 async function generateUniqueCode() {
@@ -92,7 +93,8 @@ router.post('/register', async (req, res) => {
     if (!isNonEmptyString(code, 10) || !isNonEmptyString(name) || !isNonEmptyString(password, 100)) {
       return res.status(400).json({ success: false, message: 'Code, name and password are required' });
     }
-    if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
+    const policy = validatePassword(password, { name, email, phone });
+    if (!policy.ok) return res.status(400).json({ success: false, message: policy.message });
 
     // Codes are reusable until expiry — not consumed on registration, so the same
     // code can onboard multiple managers (see /generate comment above).
@@ -100,11 +102,11 @@ router.post('/register', async (req, res) => {
     if (!invite) return res.status(400).json({ success: false, message: 'Invalid or expired invite code' });
 
     if (email) {
-      const existing = await User.findOne({ email: email.toLowerCase() });
+      const existing = await User.findOne({ email: email.toLowerCase(), deletedAt: null });
       if (existing) return res.status(400).json({ success: false, message: 'Email already registered' });
     }
     if (phone && invite.role === 'manager') {
-      const existingPhone = await User.findOne({ phone });
+      const existingPhone = await User.findOne({ phone, deletedAt: null });
       if (existingPhone) return res.status(400).json({ success: false, message: 'Phone number already registered. Please log in instead.' });
     }
 
