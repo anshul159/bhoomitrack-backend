@@ -36,10 +36,18 @@ router.post('/generate', auth, async (req, res) => {
 
     let inviteRole;
     if (sender.role === 'super_admin') {
-      // super_admin can generate either owner or manager invites
-      const requested = req.body?.role;
-      if (requested === 'manager') inviteRole = 'manager';
-      else inviteRole = 'owner'; // default for super_admin
+      // A super_admin can mint either kind, so the role must be asked for explicitly.
+      //
+      // This used to default to `owner` when none was given (PF-012). The app never
+      // sent one, so the button labelled "Invite Manager" handed out a code granting
+      // full owner access — every site, all financials, and the power to invite more
+      // owners — to someone the sender believed they were adding as a site manager.
+      //
+      // The app now always names the role. The default is `manager` so that a caller
+      // that omits it — an older build, a direct API call — gets the *lesser*
+      // privilege: asking for an owner invite and receiving a manager one is a visible,
+      // harmless failure, while the reverse is a silent and dangerous one.
+      inviteRole = req.body?.role === 'owner' ? 'owner' : 'manager';
     } else if (sender.role === 'owner') {
       inviteRole = 'manager';
     } else {

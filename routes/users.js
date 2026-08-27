@@ -299,10 +299,28 @@ router.delete('/me', auth, async (req, res) => {
 // Manager: get the owner/super_admin for their org
 router.get('/owner', auth, async (req, res) => {
   try {
-    const owner = await User.findOne(live({
-      role: { $in: ['owner', 'super_admin'] },
-      orgId: req.user.orgId,
-    }));
+    // Deterministic, in this order (PF-015):
+    //   1. the organisation's registered super admin
+    //   2. failing that, the longest-standing live owner
+    //
+    // This used to be an unordered findOne, so in a company with more than one owner
+    // it returned whichever document the database happened to hand back first. A
+    // manager's message went to an arbitrary owner and was invisible to the others,
+    // with nothing to tell either party — and orgs reach two owners through the
+    // product's own owner-invite flow.
+    const org = await Organization.findById(req.user.orgId).select('superAdminId').lean();
+
+    let owner = null;
+    if (org?.superAdminId) {
+      owner = await User.findOne(live({ _id: org.superAdminId, orgId: req.user.orgId }));
+    }
+    if (!owner) {
+      owner = await User.findOne(live({
+        role: { $in: ['owner', 'super_admin'] },
+        orgId: req.user.orgId,
+      })).sort({ createdAt: 1, _id: 1 });
+    }
+
     if (!owner) return res.status(404).json({ success: false, message: 'No owner found for your org' });
     return res.json({ success: true, data: { id: owner._id, name: owner.name, phone: owner.phone || '', site_name: '' } });
   } catch (err) {
@@ -440,9 +458,15 @@ router.put('/assign-site/:userId', auth, ownerOnly, async (req, res) => {
     const firstSite = resolved[0];
     manager.site_name = appending && manager.site_name ? manager.site_name : firstSite.name;
     manager.assignedAt = new Date();
-    // Site scope is baked into what the manager may read, so a change to it must
-    // invalidate tokens rather than wait up to thirty days (ENH-012/ENH-024).
-    manager.tokenVersion = (manager.tokenVersion || 0) + 1;
+    // Deliberately does NOT bump tokenVersion (PF-014).
+    //
+    // It used to, on the reasoning that site scope is baked into a token and a change
+    // must not wait thirty days to take effect. That reasoning does not hold: the auth
+    // middleware reloads `site_ids` and `site_name` from this document on EVERY
+    // request, and `siteAccess` reads them from there — a token has never carried site
+    // scope, so there was no stale-scope window to close. What the bump did instead was
+    // sign the manager out of the app mid-task, on an action an owner performs
+    // routinely, with a message telling them their session had expired.
     await manager.save();
 
     audit.record(req, {
@@ -520,7 +544,9 @@ router.put('/remove-from-site/:userId', auth, ownerOnly, async (req, res) => {
       manager.site_name = remaining?.name || '';
     }
 
-    manager.tokenVersion = (manager.tokenVersion || 0) + 1;
+    // As in assign-site above: no tokenVersion bump. Scope is re-read from this
+    // document on every request, so removal takes effect on the manager's very next
+    // call without ending their session (PF-014).
     await manager.save();
 
     audit.record(req, {

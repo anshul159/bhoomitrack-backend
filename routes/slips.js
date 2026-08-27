@@ -35,6 +35,19 @@ function formatSlip(slip) {
   };
 }
 
+/**
+ * Puts a slip back to pending after its inventory deduction could not be completed
+ * (PF-013). The approve route claims the slip atomically before touching stock, so a
+ * refusal has to release that claim or the slip would be stuck as approved with
+ * nothing deducted — the exact inconsistency the claim exists to prevent.
+ */
+async function revertClaim(slipId, orgId) {
+  await Slip.updateOne(
+    { _id: slipId, orgId, status: 'approved' },
+    { $set: { status: 'pending' }, $unset: { decided_by: '', decided_at: '' } }
+  );
+}
+
 // ─── POST /api/slips/generate ─────────────────────────────────────────────────
 // Creates slip as PENDING — does NOT touch inventory until owner approves
 router.post('/generate', auth, requireApproved, async (req, res) => {
@@ -188,22 +201,84 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
       return res.status(400).json({ success: false, message: `Slip is already ${existing.status}` });
     }
 
-    // Deduct inventory atomically per item, clamped at 0 (single bulk operation)
-    const ops = slip.items
-      .filter(item => item.inventory_id && isPositiveNumber(Number(item.quantity_taken)))
-      .map(item => ({
-        updateOne: {
-          filter: { _id: item.inventory_id, orgId: req.user.orgId },
-          update: [{
-            $set: {
-              quantity: {
-                $max: [0, { $subtract: [{ $ifNull: ['$quantity', 0] }, Number(item.quantity_taken)] }]
-              }
-            }
-          }],
-        }
-      }));
-    if (ops.length > 0) await Inventory.bulkWrite(ops);
+    // Deduct inventory, re-checking availability as part of the write (PF-013).
+    //
+    // Stock is verified when the slip is WRITTEN, but it is spent here, and the two
+    // can be days apart. The previous version clamped with `$max: [0, …]`, so a
+    // shortfall was absorbed silently: two pending slips for 400 of a 500-bag stock
+    // both passed their own check, both approved, and the slips then claimed 800 bags
+    // issued where 500 existed — with the consumption reports billing the difference
+    // and nothing anywhere flagging it.
+    //
+    // The `$gte` guard makes each deduction conditional on the stock still being
+    // there, so the check and the write are one atomic step and cannot be raced apart.
+    const deductible = slip.items.filter(
+      item => item.inventory_id && isPositiveNumber(Number(item.quantity_taken))
+    );
+
+    // An item deleted since the slip was written is skipped, not failed — that stays
+    // a graceful no-op, as PT-07 RC-07 pins it. Only a real shortfall blocks approval.
+    const liveDocs = await Inventory.find(
+      { _id: { $in: deductible.map(i => i.inventory_id) }, orgId: req.user.orgId },
+      'name unit quantity'
+    ).lean();
+    const liveMap = Object.fromEntries(liveDocs.map(d => [d._id.toString(), d]));
+
+    const short = deductible
+      .map(item => ({ item, inv: liveMap[item.inventory_id.toString()] }))
+      .filter(({ item, inv }) => inv && Number(inv.quantity) < Number(item.quantity_taken));
+
+    if (short.length > 0) {
+      await revertClaim(slip._id, req.user.orgId);
+      const { item, inv } = short[0];
+      return res.status(400).json({
+        success: false,
+        code: 'insufficient_stock',
+        message: short.length === 1
+          ? `Only ${inv.quantity} ${inv.unit} of ${inv.name} left — this slip needs ${item.quantity_taken}. Stock has changed since it was submitted.`
+          : `${short.length} materials on this slip are no longer in stock in the quantities requested. Stock has changed since it was submitted.`,
+      });
+    }
+
+    // Applied one at a time so a failure can be undone precisely. A bulk write
+    // reports only how many ops matched, not which — and rolling back the wrong
+    // line would invent stock. Slips are capped at 100 items and this is the
+    // approval path, not a hot one.
+    const applied = [];
+    let blocked = null;
+
+    for (const item of deductible) {
+      if (!liveMap[item.inventory_id.toString()]) continue;   // deleted since — skip
+      const qty = Number(item.quantity_taken);
+      const updated = await Inventory.findOneAndUpdate(
+        { _id: item.inventory_id, orgId: req.user.orgId, quantity: { $gte: qty } },
+        { $inc: { quantity: -qty } },
+        { new: true }
+      );
+      if (!updated) { blocked = item; break; }
+      applied.push({ id: item.inventory_id, qty });
+    }
+
+    // Something changed the stock between the check above and the write — a
+    // concurrent approval, or an owner editing the quantity. Put back exactly what
+    // was taken and leave the slip pending, so the owner gets an error instead of a
+    // half-applied deduction.
+    if (blocked) {
+      if (applied.length > 0) {
+        await Inventory.bulkWrite(applied.map(a => ({
+          updateOne: {
+            filter: { _id: a.id, orgId: req.user.orgId },
+            update: { $inc: { quantity: a.qty } },
+          }
+        })));
+      }
+      await revertClaim(slip._id, req.user.orgId);
+      return res.status(409).json({
+        success: false,
+        code: 'stock_changed',
+        message: 'Stock changed while this slip was being approved. Please try again.',
+      });
+    }
 
     // Refresh updated_stock on the slip items so the record reflects reality
     const invDocs = await Inventory.find(
