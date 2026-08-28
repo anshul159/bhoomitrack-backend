@@ -33,6 +33,16 @@ const userSchema = new mongoose.Schema({
   otpExpiry: { type: Date, default: null },
   otpAttempts: { type: Number, default: 0 },
 
+  // ─── Profile picture ───────────────────────────────────────────────────────
+  // A `data:image/...;base64,` URI rather than a URL, because there is no object
+  // store in this deployment and adding one would mean a new provider account,
+  // new credentials and a bill. The client downscales to 256x256 JPEG before
+  // sending — 15-35 KB typically — so this stays far inside both Express's 1 MB
+  // body limit and Mongo's 16 MB document limit. `select: false` keeps it OUT of
+  // every query that does not ask for it: it must never ride along in a manager
+  // list or a chat payload, which are already the largest responses (PF-005).
+  avatar: { type: String, default: '', select: false },
+
   // ─── Push (ENH-014) ────────────────────────────────────────────────────────
   fcmTokens: { type: [deviceTokenSchema], default: [] },
 

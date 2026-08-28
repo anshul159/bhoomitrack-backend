@@ -13,7 +13,7 @@ const { sendPasswordResetEmail, isConfigured: mailConfigured } = require('../uti
 const { resolveSite } = require('../utils/site');
 const audit = require('../utils/audit');
 const { captureError } = require('../utils/observability');
-const { isNonEmptyString, isObjectId } = require('../utils/validate');
+const { isNonEmptyString, isObjectId, isAvatarDataUri, AVATAR_MAX_CHARS } = require('../utils/validate');
 
 const OTP_TTL_MINUTES = 15;
 const OTP_MAX_ATTEMPTS = 5;
@@ -32,6 +32,10 @@ const userToResponse = (user, token) => ({
     site_ids: (user.site_ids || []).map(String),
     approved: user.status === 'approved',
     status: user.status,
+    // `avatar` is select:false, so it is only present when the caller explicitly
+    // asked for it. Undefined must not become the string "undefined" on a client
+    // that renders whatever it is handed.
+    avatar: user.avatar || '',
   }
 });
 
@@ -45,7 +49,7 @@ router.post('/login', async (req, res) => {
     if (!isNonEmptyString(email) || !isNonEmptyString(password, 128)) {
       return res.status(400).json({ success: false, message: 'Email and password required' });
     }
-    const user = await User.findOne(live({ email: email.toLowerCase(), role: { $in: ['owner', 'super_admin'] } }));
+    const user = await User.findOne(live({ email: email.toLowerCase(), role: { $in: ['owner', 'super_admin'] } })).select('+avatar');
     if (!user || !user.password) return res.status(401).json({ success: false, message: 'Invalid credentials' });
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(401).json({ success: false, message: 'Invalid credentials' });
@@ -64,7 +68,7 @@ router.post('/manager-login', async (req, res) => {
     if (!isNonEmptyString(phone, 20) || !isNonEmptyString(password, 128)) {
       return res.status(400).json({ success: false, message: 'Phone and password required' });
     }
-    const user = await User.findOne(live({ phone, role: 'manager' }));
+    const user = await User.findOne(live({ phone, role: 'manager' })).select('+avatar');
     if (!user) return res.status(401).json({ success: false, message: 'Invalid phone number or password' });
     if (!user.password) return res.status(401).json({ success: false, message: 'No password set. Please register via invite code.' });
     const match = await bcrypt.compare(password, user.password);
@@ -224,10 +228,81 @@ router.post('/logout', auth, async (req, res) => {
 // ─── GET /api/users/me ────────────────────────────────────────────────────────
 router.get('/me', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user.id).lean();
+    // +avatar because the field is select:false — /me is one of the few places
+    // that genuinely wants it.
+    const user = await User.findById(req.user.id).select('+avatar').lean();
     if (!user || user.deletedAt) return res.status(404).json({ success: false, message: 'Account not found' });
     return res.json(userToResponse(user, null));
   } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── PUT /api/users/me/avatar ─────────────────────────────────────────────────
+// Set the signed-in user's profile picture. The image arrives inline as a data
+// URI; see models/User.js for why it is stored on the document rather than in an
+// object store.
+//
+// The size and format checks are enforced here and not merely on the device: the
+// client downscales as a courtesy to the network, but nothing stops a caller from
+// posting a 900 KB PNG straight at this route, and a user document that grows
+// without bound is a slow outage rather than a fast one.
+router.put('/me/avatar', auth, async (req, res) => {
+  try {
+    const { avatar } = req.body;
+    if (!isAvatarDataUri(avatar)) {
+      return res.status(400).json({
+        success: false,
+        message: `Send a jpeg, png or webp image as a data URI, at most ${Math.floor(AVATAR_MAX_CHARS / 1024)} KB encoded.`,
+      });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user || user.deletedAt) return res.status(404).json({ success: false, message: 'Account not found' });
+
+    user.avatar = avatar;
+    await user.save();
+
+    // Deliberately not audited with a before/after: the payload is the image, and
+    // writing two copies of it into the audit log on every change would grow that
+    // collection by megabytes for no investigative value (PF-010).
+    audit.record(req, {
+      action: 'user.avatar.set',
+      entity: 'user',
+      entity_id: user._id,
+      entity_label: user.name,
+    });
+
+    return res.json({ success: true, message: 'Profile picture updated', avatar: user.avatar });
+  } catch (err) {
+    console.error('[AVATAR SET]', err);
+    captureError(err, { route: 'users.setAvatar' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── DELETE /api/users/me/avatar ──────────────────────────────────────────────
+// Remove the picture and fall back to initials. Idempotent: removing a picture
+// that is already absent succeeds, because the caller's intent is satisfied.
+router.delete('/me/avatar', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user || user.deletedAt) return res.status(404).json({ success: false, message: 'Account not found' });
+
+    user.avatar = '';
+    await user.save();
+
+    audit.record(req, {
+      action: 'user.avatar.clear',
+      entity: 'user',
+      entity_id: user._id,
+      entity_label: user.name,
+    });
+
+    return res.json({ success: true, message: 'Profile picture removed', avatar: '' });
+  } catch (err) {
+    console.error('[AVATAR CLEAR]', err);
+    captureError(err, { route: 'users.clearAvatar' });
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
