@@ -63,4 +63,39 @@ userSchema.index({ role: 1, status: 1, site_name: 1 });
 userSchema.index({ orgId: 1, role: 1, status: 1 });
 userSchema.index({ deletedAt: 1 });
 
+// ─── Identity uniqueness (PF-001) ───────────────────────────────────────────────
+//
+// 20 simultaneous register-company calls on one email produced 20 accounts, in 15 of
+// 15 rounds. The route looked the address up before inserting, which is a check and
+// an insert with a gap between them — the classic read-then-write race. Only the
+// database can close it.
+//
+// The consequence was worse than duplicate rows: `login` resolves with
+// findOne({ email }), so the customer authenticated into a *different organisation*
+// depending on which document the index happened to return. Their data appeared to
+// vanish and come back between logins, with no way to recover inside the product.
+//
+// These are PARTIAL indexes for two reasons. Managers sign up with a phone and no
+// email, owners with an email and no phone, and both default to '' — a plain unique
+// index would let exactly one user in the entire system have a blank email. And a
+// soft-deleted account should not hold its address hostage forever, so deleted rows
+// are excluded and the address becomes reusable once the account is gone.
+userSchema.index(
+  { email: 1 },
+  {
+    unique: true,
+    name: 'email_unique_active',
+    partialFilterExpression: { email: { $gt: '' }, deletedAt: null },
+  }
+);
+
+userSchema.index(
+  { phone: 1 },
+  {
+    unique: true,
+    name: 'phone_unique_active',
+    partialFilterExpression: { phone: { $gt: '' }, deletedAt: null },
+  }
+);
+
 module.exports = mongoose.model('User', userSchema);

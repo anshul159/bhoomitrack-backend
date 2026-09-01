@@ -14,6 +14,7 @@ const { resolveSite } = require('../utils/site');
 const audit = require('../utils/audit');
 const { captureError } = require('../utils/observability');
 const { isNonEmptyString, isObjectId, isAvatarDataUri, AVATAR_MAX_CHARS } = require('../utils/validate');
+const { respondIfDuplicate } = require('../utils/duplicateKey');
 
 const OTP_TTL_MINUTES = 15;
 const OTP_MAX_ATTEMPTS = 5;
@@ -674,6 +675,7 @@ router.post('/setup-super-admin', async (req, res) => {
       user: { id: superAdmin._id, name: superAdmin.name, email: superAdmin.email, role: superAdmin.role, orgId: org._id }
     });
   } catch (err) {
+    if (respondIfDuplicate(res, err)) return;
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -690,17 +692,38 @@ router.post('/register-company', async (req, res) => {
     const policy = validatePassword(password, { name, email });
     if (!policy.ok) return res.status(400).json({ success: false, message: policy.message });
 
-    const existing = await User.findOne({ email: email.toLowerCase() });
+    // `deletedAt: null` matches the partial unique index in models/User.js. Without
+    // it the two disagree: the index frees an address when the account is deleted,
+    // and this check went on refusing it — so someone who deleted their account
+    // could never come back, and was told the address was taken by an account that
+    // no longer exists.
+    const existing = await User.findOne({ email: email.toLowerCase(), deletedAt: null });
     if (existing) {
       return res.status(400).json({ success: false, message: 'An account with this email already exists' });
     }
 
     const org = await Organization.create({ name: companyName });
-    const hashed = await bcrypt.hash(password, 10);
-    const superAdmin = await User.create({
-      name, email: email.toLowerCase(), password: hashed,
-      role: 'super_admin', status: 'approved', orgId: org._id,
-    });
+
+    // The organisation exists before the user does, so anything that fails from here
+    // leaves it orphaned. That was harmless while User.create only failed on a bug;
+    // with the PF-001 unique index it fails whenever two registrations race, which is
+    // precisely the case this endpoint now has to survive. Losing the race must cost
+    // the loser nothing, so the org is removed on any failure.
+    let superAdmin;
+    try {
+      const hashed = await bcrypt.hash(password, 10);
+      superAdmin = await User.create({
+        name, email: email.toLowerCase(), password: hashed,
+        role: 'super_admin', status: 'approved', orgId: org._id,
+      });
+    } catch (err) {
+      await Organization.deleteOne({ _id: org._id }).catch(() => {});
+      // The pre-check above catches the ordinary case; this catches the race it
+      // cannot (PF-001), and answers it with the same message.
+      if (respondIfDuplicate(res, err)) return;
+      throw err;
+    }
+
     org.superAdminId = superAdmin._id;
     await org.save();
 
@@ -710,6 +733,7 @@ router.post('/register-company', async (req, res) => {
       trial_ends_at: org.trialEndsAt,
     });
   } catch (err) {
+    if (respondIfDuplicate(res, err)) return;
     console.error(err);
     captureError(err, { route: 'users.registerCompany' });
     res.status(500).json({ success: false, message: 'Server error' });

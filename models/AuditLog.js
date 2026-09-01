@@ -30,4 +30,28 @@ const auditLogSchema = new mongoose.Schema({
 auditLogSchema.index({ orgId: 1, createdAt: -1 });
 auditLogSchema.index({ orgId: 1, entity: 1, entity_id: 1, createdAt: -1 });
 
+// Retention (PF-010).
+//
+// One slip lifecycle writes two audit rows against one slip row, and every inventory
+// edit, order decision and site change adds more — so this collection grows at roughly
+// twice the rate of the business data it describes, and had no bound of any kind. Left
+// alone it becomes the largest collection in the database.
+//
+// A TTL index is the fix rather than a cron job: MongoDB expires the rows itself, so
+// there is no script to schedule, forget, or have fail silently.
+//
+// The default is deliberately long. These rows are what the product shows in a dispute
+// about material worth real money, so the retention window has to outlast the argument,
+// not merely the storage bill. Set AUDIT_RETENTION_DAYS=0 to disable expiry entirely —
+// which is the right setting if a customer's contract or a regulator requires it.
+const AUDIT_RETENTION_DAYS = Number(process.env.AUDIT_RETENTION_DAYS ?? 1095); // 3 years
+
+if (AUDIT_RETENTION_DAYS > 0) {
+  auditLogSchema.index(
+    { createdAt: 1 },
+    { expireAfterSeconds: AUDIT_RETENTION_DAYS * 24 * 60 * 60, name: 'audit_ttl' }
+  );
+}
+
 module.exports = mongoose.model('AuditLog', auditLogSchema);
+module.exports.RETENTION_DAYS = AUDIT_RETENTION_DAYS;

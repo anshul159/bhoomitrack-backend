@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+// No `auth` here on purpose — applied at the mount in server.js (PF-007).
 const { ownerOnly, requireApproved } = require('../middleware/roles');
 const siteAccess = require('../middleware/siteAccess');
 const Order = require('../models/Order');
@@ -38,7 +38,7 @@ const orderToResponse = (o) => ({
 //
 // The site is taken from the manager's own assignment, never from the body, so a
 // manager cannot raise a request against a site they do not hold.
-router.post('/request', auth, requireApproved, async (req, res) => {
+router.post('/request',requireApproved, async (req, res) => {
   try {
     const { material_name, quantity, unit, reason, site_name } = req.body;
 
@@ -123,7 +123,7 @@ router.post('/request', auth, requireApproved, async (req, res) => {
 
 // ─── GET /api/orders ──────────────────────────────────────────────────────────
 // All orders for this org (owner dashboard summary)
-router.get('/', auth, ownerOnly, async (req, res) => {
+router.get('/',ownerOnly, async (req, res) => {
   try {
     const paging = parsePaging(req.query, { defaultLimit: 200 });
     const filter = { orgId: req.user.orgId };
@@ -136,7 +136,7 @@ router.get('/', auth, ownerOnly, async (req, res) => {
 });
 
 // ─── GET /api/orders/:site ────────────────────────────────────────────────────
-router.get('/:site', auth, siteAccess, async (req, res) => {
+router.get('/:site',siteAccess, async (req, res) => {
   try {
     const paging = parsePaging(req.query, { defaultLimit: 500 });
     const filter = { orgId: req.user.orgId, ...siteFilter(req.site) };
@@ -197,7 +197,7 @@ async function decide(req, res, nextStatus, pastTense) {
 }
 
 // ─── PUT /api/orders/accept/:id ───────────────────────────────────────────────
-router.put('/accept/:id', auth, ownerOnly, async (req, res) => {
+router.put('/accept/:id',ownerOnly, async (req, res) => {
   try {
     return await decide(req, res, 'accepted', 'accepted');
   } catch (err) {
@@ -206,7 +206,7 @@ router.put('/accept/:id', auth, ownerOnly, async (req, res) => {
 });
 
 // ─── PUT /api/orders/reject/:id ───────────────────────────────────────────────
-router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
+router.put('/reject/:id',ownerOnly, async (req, res) => {
   try {
     return await decide(req, res, 'rejected', 'rejected');
   } catch (err) {

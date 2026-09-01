@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
-const auth = require('../middleware/auth');
+// No `auth` here on purpose — applied at the mount in server.js (PF-007).
 const { ownerOnly } = require('../middleware/roles');
 const Slip = require('../models/Slip');
 const Order = require('../models/Order');
@@ -25,7 +25,7 @@ const { resolveSite, siteFilter } = require('../utils/site');
 //   slip_stats          — slip counts, approval rate, avg approval turnaround
 //   order_stats         — order counts + acceptance rate
 //   by_manager          — slip activity per manager (accountability / reconciliation)
-router.get('/analytics', auth, ownerOnly, async (req, res) => {
+router.get('/analytics',ownerOnly, async (req, res) => {
   try {
     const days = Math.max(0, parseInt(req.query.days, 10) || 0);
     const site = req.query.site && req.query.site !== 'All Sites' ? String(req.query.site) : null;

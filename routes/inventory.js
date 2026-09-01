@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+// No `auth` here on purpose — applied at the mount in server.js (PF-007).
 const { ownerOnly } = require('../middleware/roles');
 const siteAccess = require('../middleware/siteAccess');
 const Inventory = require('../models/Inventory');
@@ -34,7 +34,7 @@ function optionalNumber(value) {
 
 // ─── GET /api/inventory/:site ─────────────────────────────────────────────────
 // siteAccess enforces that a manager can only read their own site (ENH-024).
-router.get('/:site', auth, siteAccess, async (req, res) => {
+router.get('/:site',siteAccess, async (req, res) => {
   try {
     const paging = parsePaging(req.query, { defaultLimit: 500 });
     const filter = { orgId: req.user.orgId, ...siteFilter(req.site) };
@@ -47,7 +47,7 @@ router.get('/:site', auth, siteAccess, async (req, res) => {
 
 // ─── POST /api/inventory/add ──────────────────────────────────────────────────
 // Owner only — stock additions/corrections are an owner action
-router.post('/add', auth, ownerOnly, async (req, res) => {
+router.post('/add',ownerOnly, async (req, res) => {
   try {
     const { name, quantity, unit, site_name, category, low_stock_threshold, unit_cost } = req.body;
     if (!isNonEmptyString(name) || !isNonEmptyString(site_name)) {
@@ -107,7 +107,7 @@ router.post('/add', auth, ownerOnly, async (req, res) => {
 // ─── PUT /api/inventory/update/:id ───────────────────────────────────────────
 // Owner only. Accepts any of quantity / low_stock_threshold / unit_cost; each is
 // optional so a caller can change one without resending the others (ENH-022).
-router.put('/update/:id', auth, ownerOnly, async (req, res) => {
+router.put('/update/:id',ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid item id' });
 
@@ -176,7 +176,7 @@ router.put('/update/:id', auth, ownerOnly, async (req, res) => {
 
 // ─── DELETE /api/inventory/delete/:id ────────────────────────────────────────
 // Owner only
-router.delete('/delete/:id', auth, ownerOnly, async (req, res) => {
+router.delete('/delete/:id',ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid item id' });
     const deleted = await Inventory.findOneAndDelete({ _id: req.params.id, orgId: req.user.orgId });

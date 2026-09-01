@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+// No `auth` here on purpose — applied at the mount in server.js (PF-007).
 const Chat = require('../models/Chat');
 const User = require('../models/User');
 const { parsePaging, pageMeta, stableSort } = require('../utils/pagination');
@@ -8,7 +8,7 @@ const { isNonEmptyString, isObjectId } = require('../utils/validate');
 
 // ─── GET /api/chat/:userId ────────────────────────────────────────────────────
 // History of the conversation between the caller and :userId.
-router.get('/:userId', auth, async (req, res) => {
+router.get('/:userId',async (req, res) => {
   try {
     const myId = req.user.id;
     const otherId = req.params.userId;
@@ -50,7 +50,7 @@ router.get('/:userId', auth, async (req, res) => {
 });
 
 // ─── POST /api/chat/send ──────────────────────────────────────────────────────
-router.post('/send', auth, async (req, res) => {
+router.post('/send',async (req, res) => {
   try {
     const { receiver_id, message } = req.body;
     if (!isObjectId(receiver_id)) return res.status(400).json({ success: false, message: 'Invalid receiver' });

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+// No `auth` here on purpose — applied at the mount in server.js (PF-007).
 const { ownerOnly, requireApproved } = require('../middleware/roles');
 const siteAccess = require('../middleware/siteAccess');
 const Slip = require('../models/Slip');
@@ -10,6 +10,7 @@ const { resolveSite, siteFilter } = require('../utils/site');
 const { parsePaging, paginate } = require('../utils/pagination');
 const audit = require('../utils/audit');
 const { isNonEmptyString, isPositiveNumber, isObjectId } = require('../utils/validate');
+const { isDuplicateKeyError } = require('../utils/duplicateKey');
 const { sendToUsers } = require('../utils/push');
 
 function formatSlip(slip) {
@@ -50,9 +51,33 @@ async function revertClaim(slipId, orgId) {
 
 // ─── POST /api/slips/generate ─────────────────────────────────────────────────
 // Creates slip as PENDING — does NOT touch inventory until owner approves
-router.post('/generate', auth, requireApproved, async (req, res) => {
+router.post('/generate',requireApproved, async (req, res) => {
   try {
     const { site_name, items } = req.body;
+    // Optional so older builds keep working (PF-003). Accepted from the body or the
+    // conventional header, whichever the client sends.
+    const clientRequestId = String(
+      req.body.client_request_id || req.get('Idempotency-Key') || ''
+    ).trim() || null;
+
+    if (clientRequestId && clientRequestId.length > 100) {
+      return res.status(400).json({ success: false, message: 'Invalid request id' });
+    }
+
+    // Fast path: this exact intent already produced a slip. Return that slip with
+    // the same shape a first attempt returns, so a retry is indistinguishable from
+    // a success the client simply never heard about — which is what it is.
+    if (clientRequestId) {
+      const existing = await Slip.findOne({ orgId: req.user.orgId, client_request_id: clientRequestId });
+      if (existing) {
+        return res.json({
+          success: true,
+          message: 'Slip generated and awaiting owner approval',
+          data: formatSlip(existing),
+          idempotent_replay: true,
+        });
+      }
+    }
 
     if (!isNonEmptyString(site_name)) return res.status(400).json({ success: false, message: 'Site name required' });
     if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
@@ -129,16 +154,37 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
       ? Number(priced.reduce((sum, i) => sum + i.line_total, 0).toFixed(2))
       : null;
 
-    const slip = await Slip.create({
-      site_id: site._id,
-      site_name: site.name,
-      manager_id: req.user.id,
-      manager_name: req.user.name,
-      items: slipItems,
-      status: 'pending',
-      total_value: totalValue,
-      orgId: req.user.orgId,
-    });
+    let slip;
+    try {
+      slip = await Slip.create({
+        site_id: site._id,
+        site_name: site.name,
+        manager_id: req.user.id,
+        manager_name: req.user.name,
+        items: slipItems,
+        status: 'pending',
+        total_value: totalValue,
+        orgId: req.user.orgId,
+        client_request_id: clientRequestId,
+      });
+    } catch (err) {
+      // The lookup above handles a retry that arrives after the first one finished.
+      // This handles the one that arrives while it is still in flight — the actual
+      // five-taps-on-a-slow-connection case (PF-003), where all five lookups miss
+      // and the index is the only thing left to decide the winner.
+      if (clientRequestId && isDuplicateKeyError(err)) {
+        const winner = await Slip.findOne({ orgId: req.user.orgId, client_request_id: clientRequestId });
+        if (winner) {
+          return res.json({
+            success: true,
+            message: 'Slip generated and awaiting owner approval',
+            data: formatSlip(winner),
+            idempotent_replay: true,
+          });
+        }
+      }
+      throw err;
+    }
 
     audit.record(req, {
       action: 'slip.generate',
@@ -170,7 +216,7 @@ router.post('/generate', auth, requireApproved, async (req, res) => {
 // ─── GET /api/slips/pending ───────────────────────────────────────────────────
 // Owner only: pending slips across all sites in this org.
 // NOTE: must stay declared BEFORE GET /:site or Express matches "pending" as a site
-router.get('/pending', auth, ownerOnly, async (req, res) => {
+router.get('/pending',ownerOnly, async (req, res) => {
   try {
     const paging = parsePaging(req.query, { defaultLimit: 200 });
     const filter = { status: 'pending', orgId: req.user.orgId };
@@ -183,7 +229,7 @@ router.get('/pending', auth, ownerOnly, async (req, res) => {
 
 // ─── PUT /api/slips/approve/:id ───────────────────────────────────────────────
 // Owner only: approve a pending slip — deducts inventory NOW
-router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
+router.put('/approve/:id',ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid slip id' });
 
@@ -322,7 +368,7 @@ router.put('/approve/:id', auth, ownerOnly, async (req, res) => {
 
 // ─── PUT /api/slips/reject/:id ────────────────────────────────────────────────
 // Owner only: reject a pending slip — no inventory change
-router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
+router.put('/reject/:id',ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid slip id' });
     const slip = await Slip.findOneAndUpdate(
@@ -365,7 +411,7 @@ router.put('/reject/:id', auth, ownerOnly, async (req, res) => {
 
 // ─── GET /api/slips/last/:site ────────────────────────────────────────────────
 // NOTE: declared before /:site so "last" never matches as a site name
-router.get('/last/:site', auth, siteAccess, async (req, res) => {
+router.get('/last/:site',siteAccess, async (req, res) => {
   try {
     const filter = { orgId: req.user.orgId, ...siteFilter(req.site) };
     // A manager asking for "my last slip" means theirs, not the site's most
@@ -381,7 +427,7 @@ router.get('/last/:site', auth, siteAccess, async (req, res) => {
 });
 
 // ─── GET /api/slips/:site ─────────────────────────────────────────────────────
-router.get('/:site', auth, siteAccess, async (req, res) => {
+router.get('/:site',siteAccess, async (req, res) => {
   try {
     const paging = parsePaging(req.query, { defaultLimit: 500 });
     const filter = { orgId: req.user.orgId, ...siteFilter(req.site) };

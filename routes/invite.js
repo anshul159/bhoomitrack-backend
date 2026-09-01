@@ -8,6 +8,7 @@ const Organization = require('../models/Organization');
 const { makeToken } = require('../utils/token');
 const { isNonEmptyString } = require('../utils/validate');
 const { validatePassword } = require('../utils/password');
+const { respondIfDuplicate } = require('../utils/duplicateKey');
 
 // Generate a 6-digit code that doesn't collide with another active invite
 async function generateUniqueCode() {
@@ -149,6 +150,9 @@ router.post('/register', async (req, res) => {
       }
     });
   } catch (err) {
+    // The pre-checks above catch the ordinary case; this catches the race they
+    // cannot (PF-001), and answers it with an equivalent message.
+    if (respondIfDuplicate(res, err)) return;
     console.error('[REGISTER ERROR]', err);
     res.status(500).json({ success: false, message: 'Server error. Please try again.' });
   }

@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const auth = require('../middleware/auth');
+// No `auth` here on purpose — applied at the mount in server.js (PF-007).
 const { ownerOnly } = require('../middleware/roles');
 const AuditLog = require('../models/AuditLog');
 const { resolveSite, siteFilter } = require('../utils/site');
@@ -34,7 +34,7 @@ const entryToResponse = (e) => ({
 // ─── GET /api/audit ───────────────────────────────────────────────────────────
 // Filters: ?entity=inventory &action=inventory.update &site=<name|id>
 //          &entity_id=<id> &from=<iso> &to=<iso> &page= &limit=
-router.get('/', auth, ownerOnly, async (req, res) => {
+router.get('/',ownerOnly, async (req, res) => {
   try {
     const filter = { orgId: req.user.orgId };
 
@@ -68,7 +68,7 @@ router.get('/', auth, ownerOnly, async (req, res) => {
 // ─── GET /api/audit/entity/:entity/:id ────────────────────────────────────────
 // The full history of one record — "show me everything that happened to this
 // material" is the question an owner actually asks.
-router.get('/entity/:entity/:id', auth, ownerOnly, async (req, res) => {
+router.get('/entity/:entity/:id',ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid id' });
     const paging = parsePaging(req.query, { defaultLimit: 100 });

@@ -1,7 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
-const auth = require('../middleware/auth');
+// No `auth` here on purpose (PF-007). server.js applies it at the mount for every
+// data route; applying it again per route cost a second `find:users` on every
+// authenticated request — 17–20% of a typical request's database work, and a full
+// extra Atlas round trip in production.
 const { ownerOnly } = require('../middleware/roles');
 const Site = require('../models/Site');
 const Inventory = require('../models/Inventory');
@@ -10,10 +13,11 @@ const Order = require('../models/Order');
 const User = require('../models/User');
 const audit = require('../utils/audit');
 const { isNonEmptyString, isNonNegativeNumber, isObjectId } = require('../utils/validate');
+const { respondIfDuplicate } = require('../utils/duplicateKey');
 
 // ─── GET /api/sites ───────────────────────────────────────────────────────────
 // 3 queries total regardless of how many sites exist, using aggregation.
-router.get('/', auth, ownerOnly, async (req, res) => {
+router.get('/',ownerOnly, async (req, res) => {
   try {
     const orgId = req.user.orgId;
     const sites = await Site.find({ orgId }).sort({ createdAt: -1 }).lean();
@@ -112,7 +116,7 @@ router.get('/', auth, ownerOnly, async (req, res) => {
 
 // ─── POST /api/sites/create ───────────────────────────────────────────────────
 // Owner only
-router.post('/create', auth, ownerOnly, async (req, res) => {
+router.post('/create',ownerOnly, async (req, res) => {
   try {
     const { name, location, materials } = req.body;
     if (!isNonEmptyString(name)) return res.status(400).json({ success: false, message: 'Site name required' });
@@ -163,6 +167,9 @@ router.post('/create', auth, ownerOnly, async (req, res) => {
 
     return res.json({ success: true, message: `Site "${name}" created successfully`, data: { id: site._id, name: site.name } });
   } catch (err) {
+    // The pre-check above catches the ordinary case; this catches the race it
+    // cannot (PF-002), and answers it with the same message.
+    if (respondIfDuplicate(res, err)) return;
     console.error(err);
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -173,7 +180,7 @@ router.post('/create', auth, ownerOnly, async (req, res) => {
 // Inventory, Slip, Order and manager assignments now carry `site_id`, a rename
 // only has to refresh the denormalised `site_name` copies — nothing is orphaned
 // by it, which was not true before.
-router.put('/rename/:id', auth, ownerOnly, async (req, res) => {
+router.put('/rename/:id',ownerOnly, async (req, res) => {
   try {
     if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid site id' });
     const { name, location } = req.body;

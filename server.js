@@ -66,24 +66,121 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(mongoSanitize()); // strips $ and . from keys to block NoSQL injection
 
-// General API limiter — generous, protects against abuse/DoS
+// ─── RATE LIMITING ────────────────────────────────────────────────────────────
+//
+// Two findings shaped what follows.
+//
+// PF-004: every limiter keyed on IP. That is right for a manager on their own
+// mobile connection and wrong for a site office, where several people share one
+// public IP and therefore one budget — most painfully on the credential limiter,
+// where 25 attempts per 15 minutes was the whole office's allowance. A few mistyped
+// passwords consumed it, and it presented as "too many attempts" to somebody who
+// had tried once.
+//
+// PF-006: the limiter bounded volume, not rate. 600 requests were permitted in any
+// distribution across 15 minutes, including all 600 in two seconds. That is exactly
+// the 07:00 shift-start shape, and what push notifications produce once enabled — a
+// notification to every owner creates a synchronised wave of app opens.
+//
+// The answer to PF-006 is a short-window limiter *alongside* the volume cap, not a
+// lower cap. A lower cap would punish the legitimate burst as well as the abusive one.
+
+const jwt = require('jsonwebtoken');
+
+// express-rate-limit v7 requires IPv6 addresses to be normalised before use as a
+// key, or a /64 client can trivially rotate addresses to get fresh buckets.
+const ipKey = rateLimit.ipKeyGenerator
+  ? (req) => rateLimit.ipKeyGenerator(req.ip)
+  : (req) => req.ip;
+
+// Identify the caller, preferring the authenticated user over the connection.
+//
+// The token is *verified*, not merely decoded. Decoding alone would let an attacker
+// mint arbitrary subjects and give themselves an unlimited supply of fresh buckets,
+// which is the whole protection gone. Verification is an HMAC check with no database
+// round trip, so this costs nothing meaningful.
+function callerKey(req) {
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Bearer ')) {
+    try {
+      const payload = jwt.verify(header.slice(7), process.env.JWT_SECRET);
+      const sub = payload.id || payload.userId || payload.sub;
+      if (sub) return `user:${sub}`;
+    } catch {
+      // Invalid or expired token — fall through to the connection key.
+    }
+  }
+  return `ip:${ipKey(req)}`;
+}
+
+// General API limiter — generous, protects against abuse/DoS. Keyed per user where
+// there is one, so an office on a single IP no longer shares one budget (PF-004).
+//
+// The four limits below are env-tunable so a test can pin one down to a value it can
+// actually reach in a few requests. They are NOT disabled under test: a limiter that
+// is switched off in the only environment that runs assertions is a limiter nobody
+// has ever checked.
+const LIMITS = {
+  apiMax:    Number(process.env.RATE_LIMIT_API_MAX    || 600),
+  burstMax:  Number(process.env.RATE_LIMIT_BURST_MAX  || 60),
+  authMax:   Number(process.env.RATE_LIMIT_AUTH_MAX   || 25),
+  sprayMax:  Number(process.env.RATE_LIMIT_SPRAY_MAX  || 200),
+};
+
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 600,
+  max: LIMITS.apiMax,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: callerKey,
   message: { success: false, message: 'Too many requests. Please slow down.' },
 });
 
-// Strict limiter for credential/OTP endpoints — blocks brute force
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 25,
+// Burst limiter (PF-006). Sits alongside the volume cap rather than replacing it:
+// 60 requests in 10 seconds is far above any real screen's needs — the busiest
+// dashboard load is a handful of calls — while still refusing a runaway retry loop
+// or a scripted flood.
+const burstLimiter = rateLimit({
+  windowMs: 10 * 1000,
+  max: LIMITS.burstMax,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: callerKey,
+  message: { success: false, message: 'Too many requests at once. Please retry in a moment.' },
+});
+
+// Strict limiter for credential/OTP endpoints — blocks brute force.
+//
+// Keyed on the connection *and* the identity being attempted (PF-004), so twelve
+// people in one office each get their own allowance while an attacker working
+// through passwords for one account is still stopped at 25.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: LIMITS.authMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => {
+    const identity = String(
+      req.body?.email || req.body?.phone || req.body?.code || ''
+    ).toLowerCase().trim();
+    return `${ipKey(req)}|${identity}`;
+  },
   message: { success: false, message: 'Too many attempts. Please try again in 15 minutes.' },
 });
 
+// A second, looser credential limiter keyed on the connection alone. Without this,
+// keying by identity would let one host spray one attempt each at thousands of
+// accounts and never trip a limit.
+const authSprayLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: LIMITS.sprayMax,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: ipKey,
+  message: { success: false, message: 'Too many attempts from this connection. Please try again later.' },
+});
+
+app.use('/api', burstLimiter);
 app.use('/api', apiLimiter);
 
 // Credential endpoints, under both the legacy and versioned prefixes.
@@ -98,7 +195,9 @@ const AUTH_PATHS = [
   '/invite/verify',
   '/invite/register',
 ];
-app.use(AUTH_PATHS.flatMap(p => [`/api${p}`, `/api/v1${p}`]), authLimiter);
+const AUTH_ROUTES = AUTH_PATHS.flatMap(p => [`/api${p}`, `/api/v1${p}`]);
+app.use(AUTH_ROUTES, authSprayLimiter);
+app.use(AUTH_ROUTES, authLimiter);
 
 // Force-update gate (ENH-010) — applies to everything under /api.
 app.use('/api', requireMinAppVersion);
