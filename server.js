@@ -5,6 +5,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const mongoSanitize = require('express-mongo-sanitize');
+const compression = require('compression');
 
 const { initSentry, attachErrorHandler, captureError } = require('./utils/observability');
 const { requireMinAppVersion, config: versionConfig } = require('./middleware/appVersion');
@@ -19,6 +20,12 @@ if (!process.env.JWT_SECRET) {
   process.exit(1);
 }
 
+// Reported by /healthz. Read from package.json rather than restated here, because
+// a hardcoded string is a fact that goes stale silently — this one still said
+// '1.2.0' several releases after it stopped being true.
+const APP_VERSION = require('./package.json').version;
+const HEALTHZ_PING_TIMEOUT_MS = Number(process.env.HEALTHZ_PING_TIMEOUT_MS || 2000);
+
 const app = express();
 
 // Render/other PaaS sit behind a reverse proxy — needed for correct client IPs (rate limiting)
@@ -29,6 +36,14 @@ initSentry(app);
 
 // ─── SECURITY MIDDLEWARE ──────────────────────────────────────────────────────
 app.use(helmet());
+
+// Response compression (PF-005).
+//
+// Measured before this was added: GET /slips/pending?limit=500 was 437.8 KB on the
+// wire and 51.0 KB gzipped — 9.0s versus 1.0s on a 400 kbps connection, which is an
+// ordinary Indian mobile link and therefore the connection most of our users are on.
+// No client change is needed; the app already sends Accept-Encoding: gzip.
+app.use(compression());
 
 // CORS allow-list (ENH-019).
 //
@@ -136,23 +151,46 @@ app.get(['/api/version', '/api/v1/version'], (req, res) => {
 
 // ─── HEALTH CHECKS ────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
-  res.json({ success: true, message: 'BhoomiTrack API is running ✅', version: '1.2.0' });
+  res.json({ success: true, message: 'BhoomiTrack API is running ✅', version: APP_VERSION });
 });
 
 // For an external uptime monitor (ENH-004). Reports the database connection, not
 // merely that the process is listening: an API that cannot reach MongoDB is down
 // as far as a customer is concerned, and a check that passes anyway is worse than
 // no check at all.
-app.get('/healthz', (req, res) => {
+app.get('/healthz', async (req, res) => {
   const states = ['disconnected', 'connected', 'connecting', 'disconnecting'];
   const state = mongoose.connection.readyState;
-  const healthy = state === 1;
+
+  // readyState is a socket flag, not a liveness probe (PF-008). A frozen mongod
+  // holds the socket open, so readyState stays 1 while every real query hangs —
+  // which is exactly the outage this check exists to catch, and exactly the one
+  // it used to report as healthy. Actually ask the server something, and bound
+  // the wait so a hung database fails the check rather than hanging it too.
+  let healthy = state === 1;
+  let database = states[state] || 'unknown';
+
+  if (healthy) {
+    try {
+      let timer;
+      await Promise.race([
+        mongoose.connection.db.admin().ping(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('ping timed out')), HEALTHZ_PING_TIMEOUT_MS);
+        }),
+      ]).finally(() => clearTimeout(timer));
+    } catch (err) {
+      healthy = false;
+      database = 'unresponsive';
+    }
+  }
+
   res.status(healthy ? 200 : 503).json({
     success: healthy,
     status: healthy ? 'ok' : 'degraded',
-    database: states[state] || 'unknown',
+    database,
     uptime_seconds: Math.round(process.uptime()),
-    version: '1.2.0',
+    version: APP_VERSION,
   });
 });
 
