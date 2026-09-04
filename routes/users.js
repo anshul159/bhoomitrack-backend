@@ -576,10 +576,17 @@ router.put('/:userId/web-access', auth, requireSuperAdmin, async (req, res) => {
   }
 });
 
+// `scope=all` widens this to pending and unassigned managers and adds `status`.
+// The DEFAULT response is deliberately untouched: the Android app calls this
+// route every day, and one API is about to have two clients. A new parameter is
+// safe where a changed default is not.
 router.get('/managers', auth, ownerOnly, async (req, res) => {
   try {
-    const managers = await User.find(live({ role: 'manager', status: 'approved', orgId: req.user.orgId }))
-      .sort({ name: 1 }).lean();
+    const all = req.query.scope === 'all';
+    const filter = { role: 'manager', orgId: req.user.orgId };
+    if (!all) filter.status = 'approved';
+
+    const managers = await User.find(live(filter)).sort({ name: 1 }).lean();
 
     // Resolve assigned site names in one query rather than per manager.
     const allIds = [...new Set(managers.flatMap(m => (m.site_ids || []).map(String)))];
@@ -599,6 +606,8 @@ router.get('/managers', auth, ownerOnly, async (req, res) => {
         site_names: names.length ? names : (m.site_name ? [m.site_name] : []),
         created_at: m.createdAt,
         assigned_at: m.assignedAt || null,
+        // Only under scope=all, so the default payload keeps its exact shape.
+        ...(all ? { status: m.status, assigned: (m.site_ids || []).length > 0 } : {}),
       };
     });
     return res.json({ success: true, message: 'OK', data });

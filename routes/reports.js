@@ -72,6 +72,9 @@ router.get('/analytics',ownerOnly, async (req, res) => {
       orderLastBySite,
       allSites,
       trendPrevAgg,
+      valueTrendAgg,
+      slipFunnelAgg,
+      siteValueAgg,
     ] = await Promise.all([
 
       // Inventory for the scope (health + forecast) — scoped to this org
@@ -271,6 +274,67 @@ router.get('/analytics',ownerOnly, async (req, res) => {
         { $unwind: '$items' },
         { $group: { _id: null, total: { $sum: '$items.quantity_taken' } } },
       ]) : Promise.resolve(null),
+
+      // 18. Money moved per day per site (WEB-APP-PLAN §6.1).
+      //
+      // `trend` above sums QUANTITY, which cannot be compared across materials —
+      // a tonne of sand and a tonne of steel are the same number and nothing
+      // like the same problem. line_total is priced at the moment the slip was
+      // raised, so a later price change cannot restate past consumption.
+      Slip.aggregate([
+        { $match: slipMatchApproved },
+        { $unwind: '$items' },
+        {
+          $group: {
+            _id: { date: { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } }, site: '$site_name' },
+            value: { $sum: { $ifNull: ['$items.line_total', 0] } },
+            priced_lines: { $sum: { $cond: [{ $ifNull: ['$items.line_total', false] }, 1, 0] } },
+            total_lines: { $sum: 1 },
+          }
+        },
+        { $project: { _id: 0, date: '$_id.date', site_name: '$_id.site', value: 1, priced_lines: 1, total_lines: 1 } },
+        { $sort: { date: 1 } },
+        { $limit: 2000 },
+      ]),
+
+      // 19. The approval funnel as a SERIES, by ISO week (WEB-APP-PLAN §6.3).
+      //
+      // slip_stats is one scalar for the whole window, which cannot answer "am I
+      // getting slower?". decided_at is preferred over updatedAt because an edit
+      // to a decided slip would otherwise restate how fast it was decided; rows
+      // written before decided_at existed fall back to updatedAt.
+      Slip.aggregate([
+        { $match: slipMatchAll },
+        {
+          $group: {
+            _id: {
+              year: { $isoWeekYear: '$createdAt' },
+              week: { $isoWeek: '$createdAt' },
+              status: '$status',
+            },
+            count: { $sum: 1 },
+            avg_hours: {
+              $avg: {
+                $cond: [
+                  { $eq: ['$status', 'pending'] },
+                  null,
+                  { $divide: [{ $subtract: [{ $ifNull: ['$decided_at', '$updatedAt'] }, '$createdAt'] }, 3600000] },
+                ]
+              }
+            },
+          }
+        },
+        { $sort: { '_id.year': 1, '_id.week': 1 } },
+        { $limit: 400 },
+      ]),
+
+      // 20. Money consumed per site (WEB-APP-PLAN §6.4).
+      // site_comparison carries quantity; the scatter needs rupees on the x axis.
+      Slip.aggregate([
+        { $match: slipMatchApproved },
+        { $unwind: '$items' },
+        { $group: { _id: '$site_name', value: { $sum: { $ifNull: ['$items.line_total', 0] } } } },
+      ]),
     ]);
 
     // ── Inventory health ────────────────────────────────────────────────────
@@ -359,11 +423,17 @@ router.get('/analytics',ownerOnly, async (req, res) => {
         const key = `${i.site_name}||${i.name}`;
         const last = lastConsumedMap[key] ? new Date(lastConsumedMap[key]).getTime() : null;
         const daysSinceUse = last ? Math.floor((now - last) / 86400000) : 9999;
+        // Quantity alone does not tell an owner whether to act. `value` is null
+        // rather than 0 when the material has no unit_cost — a missing price must
+        // not read as "this idle stock is worthless" (ENH-017's honesty rule).
+        const unitCost = typeof i.unit_cost === 'number' ? i.unit_cost : null;
         return {
           material_name: i.name,
           site_name: i.site_name,
           quantity: i.quantity,
           unit: i.unit,
+          unit_cost: unitCost,
+          value: unitCost != null ? Math.round(i.quantity * unitCost * 100) / 100 : null,
           days_since_use: daysSinceUse,
           never_used: !last,
         };
@@ -501,6 +571,47 @@ router.get('/analytics',ownerOnly, async (req, res) => {
 
     // ── KPI summary (always-visible strip) ───────────────────────────────────
     const stockoutRiskCount = allForecast.filter(i => i.status === 'critical' || i.status === 'out').length;
+    // ── The approval funnel, week by week (WEB-APP-PLAN §6.3) ───────────────
+    // One row per ISO week rather than one per week+status, because the chart is
+    // a stacked bar and the client should not have to pivot it.
+    const funnelWeeks = {};
+    for (const row of slipFunnelAgg || []) {
+      const key = `${row._id.year}-W${String(row._id.week).padStart(2, '0')}`;
+      const w = funnelWeeks[key] || (funnelWeeks[key] = {
+        week: key, raised: 0, approved: 0, rejected: 0, pending: 0,
+        _decidedHours: 0, _decidedCount: 0,
+      });
+      w.raised += row.count;
+      if (row._id.status === 'approved') w.approved += row.count;
+      else if (row._id.status === 'rejected') w.rejected += row.count;
+      else if (row._id.status === 'pending') w.pending += row.count;
+      if (row.avg_hours != null) { w._decidedHours += row.avg_hours * row.count; w._decidedCount += row.count; }
+    }
+    const slipFunnel = Object.values(funnelWeeks)
+      .sort((a, b) => a.week.localeCompare(b.week))
+      .map(w => ({
+        week: w.week,
+        raised: w.raised,
+        approved: w.approved,
+        rejected: w.rejected,
+        pending: w.pending,
+        // null, not 0: a week whose slips are all still pending has no decision
+        // time, and zero would draw a line saying the owner was instant.
+        avg_decision_hours: w._decidedCount > 0
+          ? Math.round((w._decidedHours / w._decidedCount) * 10) / 10 : null,
+      }));
+
+    // ── Money moved per day per site (WEB-APP-PLAN §6.1) ────────────────────
+    const valueTrend = (valueTrendAgg || []).map(v => ({
+      date: v.date,
+      site_name: v.site_name,
+      value: Math.round((v.value || 0) * 100) / 100,
+      // Same honesty rule as `value.unpriced_materials`: a total computed over
+      // only some of the lines has to say so.
+      priced_lines: v.priced_lines,
+      total_lines: v.total_lines,
+    }));
+
     const idleStockCount = idleStock.length;
     const pendingApprovalsTotal = slipPending + ordPending;
     const totalConsumption = topConsumed.reduce((s, c) => s + c.total_taken, 0);
@@ -512,12 +623,16 @@ router.get('/analytics',ownerOnly, async (req, res) => {
 
     // ── Site comparison assembly ────────────────────────────────────────────
     const invBySite = Object.fromEntries(siteCmpInv.map(s => [s._id, s]));
+    // ₹ consumed per site (WEB-APP-PLAN §6.4) — the x axis of the capital scatter.
+    const siteValueMap = Object.fromEntries((siteValueAgg || []).map(v => [v._id, v.value || 0]));
+
     const siteComparison = siteCmpSlips.map(s => ({
       site_name: s._id,
       slips: s.slips,
       approved_slips: s.approved,
       pending_slips: s.pending,
       quantity_consumed: Math.round(s.quantity_consumed * 100) / 100,
+      value_consumed: Math.round((siteValueMap[s._id] || 0) * 100) / 100,
       total_materials: invBySite[s._id]?.total_materials || 0,
       low_stock_count: invBySite[s._id]?.low_stock || 0,
       out_of_stock_count: invBySite[s._id]?.out_of_stock || 0,
@@ -527,6 +642,7 @@ router.get('/analytics',ownerOnly, async (req, res) => {
       if (!siteComparison.find(s => s.site_name === name)) {
         siteComparison.push({
           site_name: name, slips: 0, approved_slips: 0, pending_slips: 0, quantity_consumed: 0,
+          value_consumed: Math.round((siteValueMap[name] || 0) * 100) / 100,
           total_materials: invBySite[name].total_materials,
           low_stock_count: invBySite[name].low_stock,
           out_of_stock_count: invBySite[name].out_of_stock,
@@ -572,6 +688,11 @@ router.get('/analytics',ownerOnly, async (req, res) => {
         // ── TAB 1: Cross-site stock intelligence ───────────────────────────
         stock_intelligence: {
           idle_stock: idleStock,                   // dead stock ≥30 days no movement
+          // The headline for §6.6: "₹X has not moved in 30 days". Only priced
+          // rows contribute, and idle_stock_unpriced says how many did not.
+          idle_stock_value: Math.round(
+            idleStock.reduce((sum, i) => sum + (i.value || 0), 0) * 100) / 100,
+          idle_stock_unpriced: idleStock.filter(i => i.value === null).length,
           transfer_suggestions: transferSuggestions.slice(0, 12),  // idle→critical cross-site moves
           stockout_risk: stockForecast,            // ranked worst-first (reused)
           overstock: overstock,                   // >3 months cover
@@ -585,7 +706,8 @@ router.get('/analytics',ownerOnly, async (req, res) => {
             .slice(0, 10)
             .map(i => ({ material_name: i.name, site_name: i.site_name, quantity: i.quantity, unit: i.unit })),
           burn_rate: burnRateItems,               // WoW change per material/site
-          trend: trend,                           // daily totals chart
+          trend: trend,                           // daily totals chart — QUANTITY
+          value_trend: valueTrend,                // daily totals by site — RUPEES (§6.1)
           trend_previous_total: trendPreviousTotal, // prior equal-length period total (days>0 only; null otherwise)
           site_comparison: siteComparison,        // per-site efficiency
         },
@@ -607,6 +729,7 @@ router.get('/analytics',ownerOnly, async (req, res) => {
         // ── TAB 4: Accountability ──────────────────────────────────────────
         accountability: {
           by_manager: byManager,
+          slip_funnel: slipFunnel,                // weekly raised/approved/rejected/pending (§6.3)
           stalled_sites: stalledSites,
           slip_stats: {
             total: slipApproved + slipRejected + slipPending,
