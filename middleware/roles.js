@@ -12,6 +12,16 @@ const requireRole = (...roles) => (req, res, next) => {
 // Convenience guards
 const ownerOnly = requireRole('owner', 'super_admin');
 
+// The organisation's own super admin. Distinct from ownerOnly, which treats an
+// owner and a super admin as the same person — true everywhere except granting
+// web access and transferring the role itself.
+const requireSuperAdmin = requireRole('super_admin');
+
+// May this person sign in to the web console? The super admin always may; an
+// owner may when granted. A manager never may — they work at a site, on a phone.
+const mayUseWebConsole = (user) =>
+  user.role === 'super_admin' || (user.role === 'owner' && Boolean(user.webAppAccess));
+
 // Managers must be APPROVED before performing write actions (slips, orders).
 // Tokens are issued at registration (the app needs them for the pending-approval
 // flow), so approval has to be re-checked in the database for sensitive writes.
@@ -29,4 +39,4 @@ const requireApproved = async (req, res, next) => {
   }
 };
 
-module.exports = { requireRole, ownerOnly, requireApproved };
+module.exports = { requireRole, ownerOnly, requireSuperAdmin, requireApproved, mayUseWebConsole };

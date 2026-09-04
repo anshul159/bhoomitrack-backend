@@ -27,6 +27,22 @@ const userSchema = new mongoose.Schema({
 
   orgId: { type: mongoose.Schema.Types.ObjectId, ref: 'Organization', default: null },
 
+  // ─── Web console entitlement ───────────────────────────────────────────────
+  //
+  // Whether this person may sign in to app.bhoomitrack.com. Granted by the org's
+  // super admin, who holds it implicitly and does not need the flag set.
+  //
+  // This is PERMISSION, not payment. Whether the company has paid is a fact about
+  // the Organization (`status` / `currentPeriodEnd`) and is checked separately by
+  // requireActiveOrg — deliberately not copied onto user rows, because managers
+  // would then need a copy too and one subscription would become N that drift.
+  //
+  // It is also an ENTITLEMENT, NOT A SECURITY BOUNDARY: `ownerOnly` is
+  // requireRole('owner','super_admin') on 28 routes and treats the two alike, so
+  // an owner without this still holds full owner rights over the same data
+  // through the Android app. Making it a boundary means splitting ownerOnly.
+  webAppAccess: { type: Boolean, default: false },
+
   // Password-reset OTP. Stored as a bcrypt hash — a database or log dump must not
   // hand someone a working reset code (ENH-001).
   otpHash: { type: String, default: null },

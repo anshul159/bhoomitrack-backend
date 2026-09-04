@@ -186,6 +186,7 @@ app.use('/api', apiLimiter);
 // Credential endpoints, under both the legacy and versioned prefixes.
 const AUTH_PATHS = [
   '/users/login',
+  '/users/web-login',
   '/users/manager-login',
   '/users/forgot-password',
   '/users/reset-password',

@@ -6,8 +6,8 @@ const User = require('../models/User');
 const Site = require('../models/Site');
 const Organization = require('../models/Organization');
 const auth = require('../middleware/auth');
-const { ownerOnly } = require('../middleware/roles');
-const { makeToken } = require('../utils/token');
+const { ownerOnly, requireSuperAdmin, mayUseWebConsole } = require('../middleware/roles');
+const { makeToken, WEB_TOKEN_TTL } = require('../utils/token');
 const { validatePassword } = require('../utils/password');
 const { sendPasswordResetEmail, isConfigured: mailConfigured } = require('../utils/mailer');
 const { resolveSite } = require('../utils/site');
@@ -19,7 +19,7 @@ const { respondIfDuplicate } = require('../utils/duplicateKey');
 const OTP_TTL_MINUTES = 15;
 const OTP_MAX_ATTEMPTS = 5;
 
-const userToResponse = (user, token) => ({
+const userToResponse = (user, token, extra) => ({
   success: true,
   message: 'OK',
   token: token || null,
@@ -37,6 +37,7 @@ const userToResponse = (user, token) => ({
     // asked for it. Undefined must not become the string "undefined" on a client
     // that renders whatever it is handed.
     avatar: user.avatar || '',
+    ...(extra || {}),
   }
 });
 
@@ -63,6 +64,46 @@ router.post('/login', async (req, res) => {
 });
 
 // ─── POST /api/users/manager-login ───────────────────────────────────────────
+// ─── POST /api/users/web-login ────────────────────────────────────────────────
+//
+// The web console's door. Tightening `ownerOnly` instead would have been an
+// outage: it guards 28 routes the Android app calls every day, and narrowing it
+// locks owners out of their phones. One new endpoint, no existing route touched.
+//
+// The credential failure is deliberately identical to /login's — the entitlement
+// refusal below is only reachable AFTER the password has been proved, so it
+// cannot be used to discover who has an account.
+router.post('/web-login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    if (!isNonEmptyString(email) || !isNonEmptyString(password, 128)) {
+      return res.status(400).json({ success: false, message: 'Email and password required' });
+    }
+    const user = await User.findOne(live({ email: email.toLowerCase(), role: { $in: ['owner', 'super_admin'] } })).select('+avatar');
+    if (!user || !user.password) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ success: false, message: 'Invalid credentials' });
+
+    if (!mayUseWebConsole(user)) {
+      return res.status(403).json({
+        success: false,
+        code: 'web_access_not_granted',
+        message: 'Ask your Super Admin for web access.',
+      });
+    }
+
+    // A shorter life than the app's 30 days — see utils/token.js.
+    return res.json(userToResponse(user, makeToken(user, WEB_TOKEN_TTL), {
+      is_super_admin: user.role === 'super_admin',
+      web_app_access: mayUseWebConsole(user),
+    }));
+  } catch (err) {
+    console.error(err);
+    captureError(err, { route: 'users.webLogin' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 router.post('/manager-login', async (req, res) => {
   try {
     const { phone, password } = req.body;
@@ -456,6 +497,85 @@ router.delete('/fcm-token', auth, async (req, res) => {
 
 // ─── GET /api/users/managers ──────────────────────────────────────────────────
 // Owner only: list all approved managers in this org
+// ─── GET /api/users/owners ────────────────────────────────────────────────────
+// Every owner and the super admin, for the console's Owners screen. Distinct from
+// the existing GET /owner, which returns ONE owner for chat routing and is called
+// by the app — that route is left exactly as it is.
+router.get('/owners', auth, ownerOnly, async (req, res) => {
+  try {
+    const users = await User.find(live({ orgId: req.user.orgId, role: { $in: ['owner', 'super_admin'] } }))
+      .select('name email role webAppAccess status createdAt')
+      .sort({ createdAt: 1 })
+      .lean();
+
+    // No `last_active` column: User has no such field and inventing one here
+    // would mean inventing the data behind it.
+    return res.json({
+      success: true,
+      data: users.map((u) => ({
+        id: u._id,
+        name: u.name,
+        email: u.email || '',
+        role: u.role,
+        is_super_admin: u.role === 'super_admin',
+        web_app_access: u.role === 'super_admin' || Boolean(u.webAppAccess),
+        status: u.status,
+        created_at: u.createdAt,
+      })),
+    });
+  } catch (err) {
+    captureError(err, { route: 'users.owners' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── PUT /api/users/:userId/web-access ────────────────────────────────────────
+// Super admin only. The super admin holds web access implicitly and cannot be
+// toggled; an owner granted it cannot pass it on.
+//
+// No tokenVersion bump: middleware/auth.js reads webAppAccess on every request,
+// so a revocation bites on the next call WITHOUT also ending the owner's Android
+// session, which a bump would do for a web-only change.
+router.put('/:userId/web-access', auth, requireSuperAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!isObjectId(userId)) return res.status(400).json({ success: false, message: 'Invalid user id' });
+    if (typeof req.body.enabled !== 'boolean') {
+      return res.status(400).json({ success: false, message: '`enabled` must be true or false' });
+    }
+
+    const target = await User.findOne(live({ _id: userId, orgId: req.user.orgId }));
+    if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+    if (target.role === 'super_admin') {
+      return res.status(400).json({ success: false, message: 'The Super Admin always has web access' });
+    }
+    if (target.role !== 'owner') {
+      return res.status(400).json({ success: false, message: 'Only an owner can be given web access' });
+    }
+
+    const before = Boolean(target.webAppAccess);
+    target.webAppAccess = req.body.enabled;
+    await target.save();
+
+    audit.record(req, {
+      action: req.body.enabled ? 'user.grant_web_access' : 'user.revoke_web_access',
+      entity: 'user', entity_id: target._id, entity_label: target.name,
+      before: { webAppAccess: before }, after: { webAppAccess: target.webAppAccess },
+    });
+
+    return res.json({
+      success: true,
+      message: req.body.enabled
+        ? `${target.name} can now sign in to the web console`
+        : `${target.name} can no longer sign in to the web console`,
+      data: { id: target._id, name: target.name, web_app_access: target.webAppAccess },
+    });
+  } catch (err) {
+    captureError(err, { route: 'users.webAccess' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 router.get('/managers', auth, ownerOnly, async (req, res) => {
   try {
     const managers = await User.find(live({ role: 'manager', status: 'approved', orgId: req.user.orgId }))

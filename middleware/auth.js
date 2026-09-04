@@ -22,7 +22,7 @@ module.exports = async (req, res, next) => {
     let user = null;
     try {
       user = await User.findById(decoded.id)
-        .select('orgId role tokenVersion deletedAt site_ids site_name name status')
+        .select('orgId role tokenVersion deletedAt site_ids site_name name status webAppAccess')
         .lean();
     } catch (_) {
       // A database blip must not read as "your token is bad" — fall through and
@@ -47,6 +47,10 @@ module.exports = async (req, res, next) => {
       req.user.status = user.status;
       req.user.site_ids = (user.site_ids || []).map(String);
       req.user.site_name = user.site_name || '';
+      // Read live, so revoking web access takes effect on the NEXT REQUEST rather
+      // than at the next login — and without bumping tokenVersion, which would
+      // also sign the owner out of their phone for a web-only change.
+      req.user.webAppAccess = Boolean(user.webAppAccess);
     }
 
     next();

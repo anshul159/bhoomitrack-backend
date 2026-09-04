@@ -25,6 +25,7 @@
  *   extend-trial <org> --days=30
  *   suspend   <org> --reason="Payment overdue"
  *   unsuspend <org>
+ *   web-access <email> --on | --off              grant or revoke console access
  *
  * <org> is an id or any part of the organisation's name.
  * Amounts are typed in RUPEES; they are stored as integer paise.
@@ -414,6 +415,59 @@ async function cmdExtendTrial() {
   log(`  ✅ ${org.name} trials until ${trialEndsAt.toDateString()}.`);
 }
 
+// Grant or revoke the web console entitlement by email. The same thing the super
+// admin will do from the Owners screen — available now, because that screen does
+// not exist yet.
+//
+// This is PERMISSION only. Whether the company has paid is a separate fact on the
+// Organization and is not touched here.
+async function cmdWebAccess() {
+  const email = (positional[0] || '').toLowerCase().trim();
+  if (!email) return fail('Which account? Pass an email address.');
+  if (flags.on === undefined && flags.off === undefined) return fail('Pass --on or --off.');
+  const enabled = flags.on !== undefined;
+
+  const user = await User.findOne({ email, deletedAt: null });
+  if (!user) {
+    // Say so plainly. This is an operator tool, not a login form — there is no
+    // account enumeration to defend against here, and a silent no-op is worse.
+    const near = await User.find({ email: new RegExp(email.split('@')[0], 'i'), deletedAt: null })
+      .select('email role').limit(5).lean();
+    fail(`No live account for "${email}".`);
+    if (near.length) {
+      console.error('   Did you mean:');
+      for (const n of near) console.error(`     ${n.email}  (${n.role})`);
+    }
+    return null;
+  }
+
+  if (user.role === 'super_admin') {
+    return fail(`${user.name} is the Super Admin and always has web access. Nothing to change.`);
+  }
+  if (user.role !== 'owner') {
+    return fail(`${user.name} is a ${user.role}. Only an owner can be given web access — a manager works at a site, on a phone.`);
+  }
+
+  const org = await Organization.findById(user.orgId);
+  const before = { webAppAccess: Boolean(user.webAppAccess) };
+  log('');
+  log(`  ${user.name} <${user.email}>`);
+  log(`  ${org ? org.name : 'no organisation'} — ${org ? org.status : '?'}`);
+  if (org && !org.isActive()) {
+    log(`  ⚠  This organisation is not active: ${org.inactiveReason()}`);
+    log('     Access can be granted anyway; the API will still answer 402 until it is paid.');
+  }
+  preview('', before, { webAppAccess: enabled });
+  if (!APPLY) return;
+
+  user.webAppAccess = enabled;
+  await user.save();
+  if (org) await auditOperator(org, enabled ? 'user.grant_web_access' : 'user.revoke_web_access',
+    before, { webAppAccess: enabled }, `${user.email} by operator`);
+  log(`  ✅ ${user.name} ${enabled ? 'can now' : 'can no longer'} sign in to the web console.`);
+  log('');
+}
+
 async function cmdSuspend() {
   const org = await resolveOrg(positional[0]);
   if (!org) return;
@@ -458,6 +512,7 @@ const COMMANDS = {
   'set-price': cmdSetPrice,
   'mark-paid': cmdMarkPaid,
   'extend-trial': cmdExtendTrial,
+  'web-access': cmdWebAccess,
   suspend: cmdSuspend,
   unsuspend: cmdUnsuspend,
 };
@@ -478,6 +533,7 @@ async function main(argv = process.argv.slice(2)) {
     log('    extend-trial <org> --days=30');
     log('    suspend      <org> --reason="..."');
     log('    unsuspend    <org>');
+    log('    web-access   <email> --on | --off              grant/revoke console access');
     log('');
     log('  <org> is an id or part of a name. Amounts in rupees. Add --yes to apply.');
     log('');
