@@ -62,6 +62,26 @@ const organizationSchema = new mongoose.Schema({
     note: { type: String, default: '' },
   },
 
+  // ─── Super Admin transfer in flight (WEB-APP-PLAN §7.1) ────────────────────
+  //
+  // The OTP lives HERE and deliberately NOT on User.otpHash, which password reset
+  // owns. Sharing those three fields would mean a password reset silently
+  // cancelling a transfer in flight and vice versa — and both failures look
+  // identical to the user: "the code didn't work."
+  //
+  // It belongs on the organisation because there is exactly one pending transfer
+  // per organisation, and that is an organisation-level fact, not a personal one.
+  pendingTransfer: {
+    type: new mongoose.Schema({
+      toUserId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+      requestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+      otpHash: { type: String, required: true },
+      expiresAt: { type: Date, required: true },
+      attempts: { type: Number, default: 0 },
+    }, { _id: false }),
+    default: null,
+  },
+
   // What was actually collected, one row per period. This is the difference
   // between knowing a subscription is active and knowing why — without it,
   // extending currentPeriodEnd loses all record of the money behind it.

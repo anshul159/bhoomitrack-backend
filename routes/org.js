@@ -3,7 +3,7 @@ const router = express.Router();
 // No `auth` here on purpose — applied at the mount in server.js (PF-007). Note that
 // org is mounted with `auth, requireOrgId` but WITHOUT requireActiveOrg, so a lapsed
 // customer can still see what they owe and export their data.
-const { ownerOnly } = require('../middleware/roles');
+const { ownerOnly, requireSuperAdmin } = require('../middleware/roles');
 const Organization = require('../models/Organization');
 const Site = require('../models/Site');
 const Inventory = require('../models/Inventory');
@@ -12,7 +12,16 @@ const Order = require('../models/Order');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const audit = require('../utils/audit');
-const { isNonEmptyString } = require('../utils/validate');
+const { isNonEmptyString, isObjectId } = require('../utils/validate');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+const mongoose = require('mongoose');
+// Required as a module rather than destructured, so the call site is late-bound.
+// A destructured reference is captured at require time and cannot be stood in
+// for — which would leave the mail behaviour here, the part most worth pinning,
+// untestable.
+const mailer = require('../utils/mailer');
+const { captureError } = require('../utils/observability');
 
 // Organisation, subscription and data-portability endpoints.
 //
@@ -68,6 +77,239 @@ router.get('/subscription',async (req, res) => {
       },
     });
   } catch (err) {
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+
+// ─── Super Admin transfer (WEB-APP-PLAN §7.4) ─────────────────────────────────
+//
+// The most consequential action in the product: it moves who may grant web
+// access and who may transfer the role again. Guarded by an emailed code so
+// possession of a logged-in session is not enough on its own.
+
+const TRANSFER_TTL_MINUTES = 15;
+const TRANSFER_MAX_ATTEMPTS = 5;
+
+/** A pending transfer that has expired is not pending. */
+const transferLive = (t) => Boolean(t && t.expiresAt && t.expiresAt > new Date());
+
+// POST /api/org/super-admin/transfer/request
+router.post('/super-admin/transfer/request', requireSuperAdmin, async (req, res) => {
+  try {
+    const { toUserId } = req.body;
+    if (!isObjectId(toUserId)) return res.status(400).json({ success: false, message: 'Invalid user id' });
+
+    const org = await Organization.findById(req.user.orgId);
+    if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
+
+    const target = await User.findOne({ _id: toUserId, orgId: req.user.orgId, deletedAt: null });
+    if (!target) return res.status(404).json({ success: false, message: 'User not found' });
+    if (String(target._id) === String(req.user.id)) {
+      return res.status(400).json({ success: false, message: 'You are already the Super Admin' });
+    }
+    if (target.role !== 'owner') {
+      return res.status(400).json({ success: false, message: 'Only an owner can become Super Admin' });
+    }
+    if (target.status !== 'approved') {
+      return res.status(400).json({ success: false, message: 'That owner is not approved yet' });
+    }
+
+    const current = await User.findById(req.user.id).select('email name');
+    if (!current?.email) {
+      // The code has to reach the OUTGOING holder. With no address there is no
+      // way to prove they agreed, and no safe way to proceed.
+      return res.status(400).json({ success: false, message: 'Your account has no email address to send the code to' });
+    }
+
+    // crypto.randomInt is uniform; Math.random is not, and this is a credential.
+    const code = String(crypto.randomInt(100000, 1000000));
+
+    // Send BEFORE storing. utils/mailer.js throws in production when SMTP is
+    // missing but WARNS AND RETURNS FALSE in development — so a confirm step
+    // that accepted a code which was never sent would be a hole. `false` is a
+    // failure here, not a success.
+    let delivered = false;
+    try {
+      delivered = await mailer.sendSuperAdminTransferEmail(
+        current.email, current.name, target.name, code, TRANSFER_TTL_MINUTES
+      );
+    } catch (mailErr) {
+      captureError(mailErr, { route: 'org.transferRequest' });
+      return res.status(502).json({ success: false, message: `Could not send the confirmation code: ${mailErr.message}` });
+    }
+    if (!delivered) {
+      return res.status(502).json({
+        success: false,
+        code: 'mail_not_configured',
+        message: 'Email is not configured on this server, so the confirmation code could not be sent.',
+      });
+    }
+
+    org.pendingTransfer = {
+      toUserId: target._id,
+      requestedBy: req.user.id,
+      otpHash: await bcrypt.hash(code, 10),
+      expiresAt: new Date(Date.now() + TRANSFER_TTL_MINUTES * 60 * 1000),
+      attempts: 0,
+    };
+    await org.save();
+
+    audit.record(req, {
+      action: 'org.super_admin_transfer_requested', entity: 'organization',
+      entity_id: org._id, entity_label: org.name,
+      after: { toUserId: String(target._id), toName: target.name },
+    });
+
+    return res.json({
+      success: true,
+      message: `A confirmation code has been emailed to you. It expires in ${TRANSFER_TTL_MINUTES} minutes.`,
+      data: { to_name: target.name, expires_in_minutes: TRANSFER_TTL_MINUTES, sent_to: current.email },
+    });
+  } catch (err) {
+    captureError(err, { route: 'org.transferRequest' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// GET /api/org/super-admin/transfer — what is in flight, if anything.
+router.get('/super-admin/transfer', requireSuperAdmin, async (req, res) => {
+  try {
+    const org = await Organization.findById(req.user.orgId);
+    const t = org?.pendingTransfer;
+    if (!transferLive(t)) return res.json({ success: true, data: null });
+    const target = await User.findById(t.toUserId).select('name email').lean();
+    return res.json({
+      success: true,
+      data: {
+        to_user_id: String(t.toUserId),
+        to_name: target?.name || 'Unknown',
+        expires_at: t.expiresAt,
+        attempts_left: Math.max(0, TRANSFER_MAX_ATTEMPTS - (t.attempts || 0)),
+      },
+    });
+  } catch (err) {
+    captureError(err, { route: 'org.transferStatus' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// POST /api/org/super-admin/transfer/cancel
+router.post('/super-admin/transfer/cancel', requireSuperAdmin, async (req, res) => {
+  try {
+    const org = await Organization.findById(req.user.orgId);
+    if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
+    if (!org.pendingTransfer) return res.json({ success: true, message: 'Nothing to cancel' });
+
+    org.pendingTransfer = null;
+    await org.save();
+    audit.record(req, {
+      action: 'org.super_admin_transfer_cancelled', entity: 'organization',
+      entity_id: org._id, entity_label: org.name,
+    });
+    return res.json({ success: true, message: 'Transfer cancelled' });
+  } catch (err) {
+    captureError(err, { route: 'org.transferCancel' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+/**
+ * The swap itself.
+ *
+ * A single transaction is the right shape and is what Atlas gives us. The test
+ * harness runs a STANDALONE mongod, where transactions are unsupported, so this
+ * falls back to ordered sequential writes rather than pretending.
+ *
+ * The order of the fallback is the whole point: PROMOTE FIRST. A failure between
+ * the two writes then leaves two super admins — an odd state, but both are
+ * trusted owners and either can finish the job. Demoting first would risk ZERO
+ * super admins, which nobody in the organisation could repair without database
+ * access.
+ */
+async function applyTransfer(org, currentId, targetId) {
+  const promote = { role: 'super_admin', $inc: { tokenVersion: 1 } };
+  // webAppAccess: true on the outgoing holder is not a nicety. Without it they
+  // instantly lose the console they just handed over, and the only person who
+  // could give it back is the one they just promoted.
+  const demote = { role: 'owner', webAppAccess: true, $inc: { tokenVersion: 1 } };
+
+  const writes = async (session) => {
+    const opts = session ? { session } : {};
+    await User.updateOne({ _id: targetId }, promote, opts);
+    await User.updateOne({ _id: currentId }, demote, opts);
+    await Organization.updateOne(
+      { _id: org._id }, { superAdminId: targetId, pendingTransfer: null }, opts
+    );
+  };
+
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(() => writes(session));
+    return 'transaction';
+  } catch (err) {
+    const unsupported = /replica set|Transaction numbers|not supported/i.test(err.message || '');
+    if (!unsupported) throw err;
+  } finally {
+    await session.endSession();
+  }
+  await writes(null);
+  return 'sequential';
+}
+
+// POST /api/org/super-admin/transfer/confirm
+router.post('/super-admin/transfer/confirm', requireSuperAdmin, async (req, res) => {
+  try {
+    const { code } = req.body;
+    if (!isNonEmptyString(code)) return res.status(400).json({ success: false, message: 'Code required' });
+
+    const org = await Organization.findById(req.user.orgId);
+    if (!org || !transferLive(org.pendingTransfer)) {
+      return res.status(400).json({ success: false, message: 'No transfer is pending, or it has expired' });
+    }
+
+    const t = org.pendingTransfer;
+    if ((t.attempts || 0) >= TRANSFER_MAX_ATTEMPTS) {
+      org.pendingTransfer = null;
+      await org.save();
+      return res.status(429).json({ success: false, message: 'Too many attempts. Start the transfer again.' });
+    }
+
+    if (!(await bcrypt.compare(String(code), t.otpHash))) {
+      org.pendingTransfer.attempts = (t.attempts || 0) + 1;
+      await org.save();
+      return res.status(400).json({
+        success: false,
+        message: 'That code is not right',
+        data: { attempts_left: TRANSFER_MAX_ATTEMPTS - org.pendingTransfer.attempts },
+      });
+    }
+
+    const target = await User.findOne({ _id: t.toUserId, orgId: org._id, deletedAt: null }).select('name role');
+    if (!target || target.role !== 'owner') {
+      org.pendingTransfer = null;
+      await org.save();
+      return res.status(409).json({ success: false, message: 'That owner is no longer eligible. Start again.' });
+    }
+
+    const mode = await applyTransfer(org, req.user.id, target._id);
+
+    audit.record(req, {
+      action: 'org.super_admin_transfer', entity: 'organization',
+      entity_id: org._id, entity_label: org.name,
+      before: { superAdminId: String(req.user.id) },
+      after: { superAdminId: String(target._id), applied: mode },
+    });
+
+    return res.json({
+      success: true,
+      // tokenVersion++ on both is what makes this immediate. It also ends their
+      // Android sessions, which is correct and a surprise if unannounced.
+      message: `${target.name} is now the Super Admin. You are both signed out and will need to log in again.`,
+      data: { new_super_admin: { id: target._id, name: target.name } },
+    });
+  } catch (err) {
+    captureError(err, { route: 'org.transferConfirm' });
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

@@ -93,4 +93,42 @@ async function sendPasswordResetEmail(to, name, code, expiryMinutes) {
   return sendMail({ to, subject: 'Your BhoomiTrack password reset code', text, html });
 }
 
-module.exports = { sendMail, sendPasswordResetEmail, isConfigured };
+// Sent to the CURRENT super admin, never to the person being promoted — the code
+// is what proves the outgoing holder agreed, so it must reach them and only them.
+async function sendSuperAdminTransferEmail(to, name, targetName, code, expiryMinutes) {
+  const greeting = name ? `Hi ${name},` : 'Hi,';
+  const text = [
+    greeting,
+    '',
+    `You asked to make ${targetName} the Super Admin of your BhoomiTrack organisation.`,
+    '',
+    `Your confirmation code is: ${code}`,
+    '',
+    `It expires in ${expiryMinutes} minutes.`,
+    '',
+    'After you confirm:',
+    `  • ${targetName} becomes Super Admin.`,
+    '  • You become an owner, and keep web console access.',
+    '  • Both of you will be signed out and will need to log in again.',
+    '',
+    'If you did not ask for this, ignore this email and change your password — nothing has changed yet.',
+    '',
+    'BhoomiTrack',
+  ].join('\n');
+
+  const html = `
+    <p>${greeting}</p>
+    <p>You asked to make <strong>${targetName}</strong> the Super Admin of your BhoomiTrack organisation.</p>
+    <p>Your confirmation code is:</p>
+    <p style="font-size:28px;font-weight:700;letter-spacing:4px;margin:16px 0">${code}</p>
+    <p>It expires in ${expiryMinutes} minutes.</p>
+    <p>After you confirm, ${targetName} becomes Super Admin, you become an owner and keep
+    web console access, and <strong>both of you will be signed out</strong>.</p>
+    <p style="color:#666">If you did not ask for this, ignore this email and change your
+    password — nothing has changed yet.</p>
+    <p>BhoomiTrack</p>`;
+
+  return sendMail({ to, subject: 'Confirm your BhoomiTrack Super Admin transfer', text, html });
+}
+
+module.exports = { sendMail, sendPasswordResetEmail, sendSuperAdminTransferEmail, isConfigured };
