@@ -15,6 +15,11 @@ const audit = require('../utils/audit');
 const { captureError } = require('../utils/observability');
 const { isNonEmptyString, isObjectId, isAvatarDataUri, AVATAR_MAX_CHARS } = require('../utils/validate');
 const { respondIfDuplicate } = require('../utils/duplicateKey');
+const {
+  UNITS,
+  effectiveMaterialDefaults,
+  normaliseMaterialDefaults,
+} = require('../utils/materialDefaults');
 
 const OTP_TTL_MINUTES = 15;
 const OTP_MAX_ATTEMPTS = 5;
@@ -345,6 +350,74 @@ router.delete('/me/avatar', auth, async (req, res) => {
   } catch (err) {
     console.error('[AVATAR CLEAR]', err);
     captureError(err, { route: 'users.clearAvatar' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── GET /api/users/me/material-defaults ──────────────────────────────────────
+// The signed-in user's Create Site material list (ENH-097).
+//
+// `units` rides along so the app's unit pickers can gain an option without a store
+// release — the list is a suggestion, not an enum (see utils/materialDefaults.js).
+router.get('/me/material-defaults', auth, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('materialDefaults deletedAt').lean();
+    if (!user || user.deletedAt) return res.status(404).json({ success: false, message: 'Account not found' });
+
+    return res.json({
+      success: true,
+      message: 'OK',
+      defaults: effectiveMaterialDefaults(user.materialDefaults),
+      units: UNITS,
+    });
+  } catch (err) {
+    console.error('[MATERIAL DEFAULTS GET]', err);
+    captureError(err, { route: 'users.getMaterialDefaults' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// ─── PUT /api/users/me/material-defaults ──────────────────────────────────────
+// Replace the list wholesale. Not a PATCH: the client owns a small ordered list it
+// has entirely in hand, and merging row-by-row would need stable ids for rows the
+// user thinks of as "the Cement one".
+//
+// An empty array is a legitimate answer — someone who tracks only materials they
+// type in per site — and is stored as `[]` rather than unset, which is exactly the
+// distinction the model's `default: undefined` preserves.
+router.put('/me/material-defaults', auth, async (req, res) => {
+  try {
+    const parsed = normaliseMaterialDefaults(req.body?.defaults);
+    if (!parsed.ok) return res.status(400).json({ success: false, message: parsed.message });
+
+    const user = await User.findById(req.user.id);
+    if (!user || user.deletedAt) return res.status(404).json({ success: false, message: 'Account not found' });
+
+    const before = Array.isArray(user.materialDefaults) ? user.materialDefaults.length : null;
+    user.materialDefaults = parsed.value;
+    await user.save();
+
+    // Counts, not contents. The interesting fact is that someone changed their form;
+    // writing twelve material names into the audit log on every tweak would grow
+    // that collection for no investigative value (the same reasoning as avatars).
+    audit.record(req, {
+      action: 'user.material_defaults.set',
+      entity: 'user',
+      entity_id: user._id,
+      entity_label: user.name,
+      before: { materials: before },
+      after: { materials: parsed.value.length },
+    });
+
+    return res.json({
+      success: true,
+      message: 'Site defaults saved',
+      defaults: effectiveMaterialDefaults(user.materialDefaults),
+      units: UNITS,
+    });
+  } catch (err) {
+    console.error('[MATERIAL DEFAULTS SET]', err);
+    captureError(err, { route: 'users.setMaterialDefaults' });
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });

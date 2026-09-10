@@ -9,6 +9,14 @@ const deviceTokenSchema = new mongoose.Schema({
   lastSeenAt: { type: Date, default: Date.now },
 }, { _id: false });
 
+// One row of the Create Site form's material list (ENH-097). `preselected` ticks
+// the box before the owner touches anything; `unit` pre-fills the unit next to it.
+const materialDefaultSchema = new mongoose.Schema({
+  name: { type: String, required: true, trim: true },
+  unit: { type: String, default: 'units', trim: true },
+  preselected: { type: Boolean, default: false },
+}, { _id: false });
+
 const userSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   phone: { type: String, trim: true, default: '' },
@@ -58,6 +66,17 @@ const userSchema = new mongoose.Schema({
   // every query that does not ask for it: it must never ride along in a manager
   // list or a chat payload, which are already the largest responses (PF-005).
   avatar: { type: String, default: '', select: false },
+
+  // ─── Create-site material defaults (ENH-097) ───────────────────────────────
+  //
+  // Which materials the Create Site form offers, and the unit each starts in. See
+  // utils/materialDefaults.js for why this lives on the user.
+  //
+  // `default: undefined` is load-bearing. Mongoose otherwise gives every user an
+  // empty array, which makes "has never opened the settings screen" — who must be
+  // shown the built-in twelve — indistinguishable from "opened it and removed
+  // every row", who must be shown nothing. Absent means seed, `[]` means empty.
+  materialDefaults: { type: [materialDefaultSchema], default: undefined },
 
   // ─── Push (ENH-014) ────────────────────────────────────────────────────────
   fcmTokens: { type: [deviceTokenSchema], default: [] },
