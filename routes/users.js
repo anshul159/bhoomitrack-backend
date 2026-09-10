@@ -843,6 +843,100 @@ router.put('/remove-from-site/:userId', auth, ownerOnly, async (req, res) => {
   }
 });
 
+// ─── POST /api/users/managers/:userId/reset-password ─────────────────────────
+// Owner or Super Admin sets a new password for one of their managers.
+//
+// A manager has no self-service route back in, and this is why: `forgot-password`
+// only matches owners and super admins, and a manager signs in by PHONE, so an
+// emailed code could not reach them even if it did. Most managers have no email
+// address on file at all — they are invited by phone. The alternative, an SMS
+// one-time code, needs a provider and (for Indian numbers) DLT registration with
+// a telecom operator, which is weeks away and costs per message.
+//
+// So the person who already administers the manager resets it. That is not a
+// privilege escalation: an owner can already see every site and every slip the
+// manager can, and can remove them from a site entirely. It grants nothing new,
+// it only makes an existing authority usable.
+//
+// The generated password is returned ONCE, in this response, for the admin to
+// read out. It is never emailed, never logged, and cannot be retrieved again.
+const TEMP_PASSWORD_LENGTH = 12;
+// No 0/O, 1/l/I: this gets read down a phone line to someone on a building site.
+const TEMP_PASSWORD_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789';
+
+function generateTempPassword() {
+  let out = '';
+  // randomInt, not Math.random: this is a credential, and the difference is a
+  // guessable stream versus an unguessable one.
+  for (let i = 0; i < TEMP_PASSWORD_LENGTH; i += 1) {
+    out += TEMP_PASSWORD_ALPHABET[crypto.randomInt(0, TEMP_PASSWORD_ALPHABET.length)];
+  }
+  return out;
+}
+
+router.post('/managers/:userId/reset-password', auth, ownerOnly, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!isObjectId(userId)) return res.status(400).json({ success: false, message: 'Invalid manager id' });
+
+    // Scoped to the caller's organisation, so one company's owner can never
+    // reset another company's manager.
+    const manager = await User.findOne({
+      _id: userId, role: 'manager', orgId: req.user.orgId, deletedAt: null,
+    });
+    if (!manager) return res.status(404).json({ success: false, message: 'Manager not found' });
+
+    // Generated passwords must satisfy the same policy as typed ones; if the
+    // alphabet ever changes in a way that trips the rules, fail here rather than
+    // hand out a password the manager's own next change would reject.
+    let tempPassword = null;
+    for (let attempt = 0; attempt < 5 && !tempPassword; attempt += 1) {
+      const candidate = generateTempPassword();
+      const check = validatePassword(candidate, {
+        name: manager.name, email: manager.email, phone: manager.phone,
+      });
+      if (check.ok) tempPassword = candidate;
+    }
+    if (!tempPassword) {
+      return res.status(500).json({ success: false, message: 'Could not generate a password. Try again.' });
+    }
+
+    await User.findByIdAndUpdate(manager._id, {
+      password: await bcrypt.hash(tempPassword, 10),
+      // Any half-finished reset code for this account dies with the password.
+      otpHash: null,
+      otpExpiry: null,
+      otpAttempts: 0,
+      // Unlike assign-site, this DOES end every existing session. A reset is what
+      // you do when a phone is lost or a password may be known to someone else,
+      // and leaving the old logins alive would defeat the point.
+      $inc: { tokenVersion: 1 },
+    });
+
+    audit.record(req, {
+      action: 'user.password_reset_by_admin',
+      entity: 'user',
+      entity_id: manager._id,
+      entity_label: manager.name,
+      note: 'Temporary password issued; all sessions ended',
+    });
+
+    return res.json({
+      success: true,
+      message: `Temporary password set for ${manager.name}. Read it to them now — it cannot be shown again.`,
+      data: {
+        name: manager.name,
+        phone: manager.phone || '',
+        tempPassword,
+      },
+    });
+  } catch (err) {
+    console.error('[MANAGER-RESET-PASSWORD ERROR]', err);
+    captureError(err, { route: 'users.managerResetPassword' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── POST /api/users/setup-super-admin ───────────────────────────────────────
 router.post('/setup-super-admin', async (req, res) => {
   try {
