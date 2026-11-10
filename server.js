@@ -237,6 +237,8 @@ function mountRoutes(base) {
   app.use(`${base}/payments`,    ...orgGuard, require('./routes/payments'));
   app.use(`${base}/arrivals`,    ...orgGuard, require('./routes/arrivals'));
   app.use(`${base}/attachments`, ...orgGuard, require('./routes/attachments'));
+  // Every site at once, for the owner home card. Owner only (enforced in the route).
+  app.use(`${base}/site-records`, ...orgGuard, require('./routes/siteRecordsSummary'));
 }
 
 mountRoutes('/api/v1');
