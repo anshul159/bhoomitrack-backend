@@ -9,6 +9,9 @@ const Site = require('../models/Site');
 const Inventory = require('../models/Inventory');
 const Slip = require('../models/Slip');
 const Order = require('../models/Order');
+const SitePayment = require('../models/SitePayment');
+const MaterialArrival = require('../models/MaterialArrival');
+const Attachment = require('../models/Attachment');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const audit = require('../utils/audit');
@@ -381,16 +384,19 @@ router.get('/export',ownerOnly, async (req, res) => {
   // counts and cheap.
   let counts;
   try {
-    const [sites, inventory, slips, orders, users, auditLog] = await Promise.all([
+    const [sites, inventory, slips, orders, users, auditLog, payments, arrivals, attachments] = await Promise.all([
       Site.countDocuments({ orgId }),
       Inventory.countDocuments({ orgId }),
       Slip.countDocuments({ orgId }),
       Order.countDocuments({ orgId }),
       User.countDocuments({ orgId }),
       AuditLog.countDocuments({ orgId }),
+      SitePayment.countDocuments({ orgId }),
+      MaterialArrival.countDocuments({ orgId }),
+      Attachment.countDocuments({ orgId }),
     ]);
     counts = {
-      sites, inventory, slips, orders, users,
+      sites, inventory, slips, orders, users, payments, arrivals, attachments,
       audit_log: Math.min(auditLog, AUDIT_EXPORT_LIMIT),
       audit_log_total: auditLog,
     };
@@ -444,6 +450,14 @@ router.get('/export',ownerOnly, async (req, res) => {
     await write(',');
     await streamArray('orders', Order.find({ orgId }));
     await write(',');
+    await streamArray('payments', SitePayment.find({ orgId }));
+    await write(',');
+    await streamArray('arrivals', MaterialArrival.find({ orgId }));
+    await write(',');
+    // The bill photos themselves, base64-encoded: they are the customer's
+    // records as much as the payments are, and the export is the only way out.
+    await streamArray('attachments', Attachment.find({ orgId }).select('+data'));
+    await write(',');
     // Credentials and push tokens are deliberately not exported.
     await streamArray('users', User.find(
       { orgId },
@@ -493,6 +507,7 @@ router.delete('/',ownerOnly, async (req, res) => {
     const counts = {};
     for (const [key, Model] of Object.entries({
       inventory: Inventory, slips: Slip, orders: Order, sites: Site, users: User, audit: AuditLog,
+      payments: SitePayment, arrivals: MaterialArrival, attachments: Attachment,
     })) {
       const r = await Model.deleteMany({ orgId });
       counts[key] = r.deletedCount;

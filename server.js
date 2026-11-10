@@ -231,6 +231,12 @@ function mountRoutes(base) {
   app.use(`${base}/chat`,      ...orgGuard, require('./routes/chat'));
   app.use(`${base}/reports`,   ...orgGuard, require('./routes/reports'));
   app.use(`${base}/audit`,     ...orgGuard, require('./routes/audit'));
+
+  // v2 site records: payments made at a site, material that arrived by the
+  // vehicle-load, and the bill photos attached to them.
+  app.use(`${base}/payments`,    ...orgGuard, require('./routes/payments'));
+  app.use(`${base}/arrivals`,    ...orgGuard, require('./routes/arrivals'));
+  app.use(`${base}/attachments`, ...orgGuard, require('./routes/attachments'));
 }
 
 mountRoutes('/api/v1');
