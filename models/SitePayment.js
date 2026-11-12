@@ -4,7 +4,11 @@ const mongoose = require('mongoose');
 // purchase, transport. A record of a payment already made, not a request — so
 // there is no approval step. A wrong entry is voided by an owner with a reason,
 // never deleted, so the history stays complete.
-const CATEGORIES = ['labour', 'material', 'purchase', 'transport', 'other'];
+//
+// Equipment (hire, fuel, repairs) and staff salary were added on 2026-11-11:
+// with material and labour they are the four heads a contractor budgets a site
+// by (the Manas conversation), and a budget head needs payments to compare with.
+const CATEGORIES = ['labour', 'material', 'equipment', 'salary', 'purchase', 'transport', 'other'];
 const PAYMENT_MODES = ['cash', 'upi', 'bank', 'cheque'];
 
 const sitePaymentSchema = new mongoose.Schema({
@@ -55,5 +59,6 @@ module.exports.CATEGORIES = CATEGORIES;
 module.exports.PAYMENT_MODES = PAYMENT_MODES;
 // The words the app shows, for messages the server writes itself (alerts).
 module.exports.CATEGORY_LABELS = {
-  labour: 'Labour', material: 'Material', purchase: 'Petty purchase', transport: 'Transport', other: 'Other',
+  labour: 'Labour', material: 'Material', equipment: 'Equipment', salary: 'Staff salary',
+  purchase: 'Petty purchase', transport: 'Transport', other: 'Other',
 };

@@ -12,6 +12,7 @@ const Slip = require('../models/Slip');
 const Order = require('../models/Order');
 const SitePayment = require('../models/SitePayment');
 const MaterialArrival = require('../models/MaterialArrival');
+const ProgressUpdate = require('../models/ProgressUpdate');
 const User = require('../models/User');
 const audit = require('../utils/audit');
 const { isNonEmptyString, isNonNegativeNumber, isObjectId } = require('../utils/validate');
@@ -216,6 +217,7 @@ router.put('/rename/:id',ownerOnly, async (req, res) => {
         // v2 records always carry site_id, so only the display name moves.
         SitePayment.updateMany({ orgId, site_id: site._id }, { $set: { site_name: newName } }),
         MaterialArrival.updateMany({ orgId, site_id: site._id }, { $set: { site_name: newName } }),
+        ProgressUpdate.updateMany({ orgId, site_id: site._id }, { $set: { site_name: newName } }),
       ]);
       const managers = await User.updateMany(
         { orgId, $or: [{ site_ids: site._id }, { site_name: oldName }] },

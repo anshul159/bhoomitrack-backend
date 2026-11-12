@@ -239,6 +239,10 @@ function mountRoutes(base) {
   app.use(`${base}/attachments`, ...orgGuard, require('./routes/attachments'));
   // Every site at once, for the owner home card. Owner only (enforced in the route).
   app.use(`${base}/site-records`, ...orgGuard, require('./routes/siteRecordsSummary'));
+  // How far each site's work has got, and its budget against what has been paid
+  // there. Budgets are owner only (enforced in the route); progress is both roles.
+  app.use(`${base}/progress`,     ...orgGuard, require('./routes/progress'));
+  app.use(`${base}/budgets`,      ...orgGuard, require('./routes/budgets'));
 }
 
 mountRoutes('/api/v1');

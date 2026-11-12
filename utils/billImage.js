@@ -1,4 +1,5 @@
-// A photographed bill, challan or slip, carried inline as a data URI (v2).
+// A photographed bill, challan or slip, carried inline as a data URI (v2) — and,
+// by the same rules, a photo of the work on a progress update.
 //
 // There is still no object store (see the understanding doc, constraint 4), so
 // the image is stored as binary in its own `Attachment` collection — never inside
@@ -23,25 +24,29 @@ const MAGIC = {
 };
 
 /**
- * Decodes and checks a bill image.
+ * Decodes and checks a photo sent as a data URI.
+ * @param label  how the messages name it, e.g. "The bill photo"
  * @returns {{ contentType: string, buffer: Buffer } | { error: string }}
  */
-function decodeBillImage(value) {
-  if (typeof value !== 'string') return { error: 'The bill photo could not be read' };
+function decodeImage(value, label) {
+  if (typeof value !== 'string') return { error: `${label} could not be read` };
   // Rough pre-check before running a regex over a huge string.
   if (value.length > Math.ceil((BILL_MAX_BYTES * 4) / 3) + 40) {
-    return { error: 'The bill photo is too large. Please retake it.' };
+    return { error: `${label} is too large. Please retake it.` };
   }
   const match = DATA_URI.exec(value);
-  if (!match) return { error: 'The bill photo must be a JPEG, PNG or WebP image' };
+  if (!match) return { error: `${label} must be a JPEG, PNG or WebP image` };
 
   const contentType = match[1];
   const buffer = Buffer.from(match[2], 'base64');
-  if (buffer.length === 0) return { error: 'The bill photo is empty' };
-  if (buffer.length > BILL_MAX_BYTES) return { error: 'The bill photo is too large. Please retake it.' };
-  if (!MAGIC[contentType](buffer)) return { error: 'The bill photo is not a valid image' };
+  if (buffer.length === 0) return { error: `${label} is empty` };
+  if (buffer.length > BILL_MAX_BYTES) return { error: `${label} is too large. Please retake it.` };
+  if (!MAGIC[contentType](buffer)) return { error: `${label} is not a valid image` };
 
   return { contentType, buffer };
 }
 
-module.exports = { decodeBillImage, BILL_MAX_BYTES };
+/** A bill image, with the messages the payment form has always shown. */
+const decodeBillImage = (value) => decodeImage(value, 'The bill photo');
+
+module.exports = { decodeImage, decodeBillImage, BILL_MAX_BYTES };

@@ -143,11 +143,15 @@ function periodFilter(query, field) {
 /**
  * PUT /void/:id — owner only. Atomically moves a record from recorded to void,
  * so two owners voiding at once cannot both write a reason.
+ *
+ * `entity` names the record in the audit log ("payment" → payment.void); `noun`
+ * is what the messages call it, when that differs ("progress update").
  */
-function voidHandler(Model, { entity, label, format }) {
+function voidHandler(Model, { entity, noun = entity, label, format }) {
+  const Noun = `${noun[0].toUpperCase()}${noun.slice(1)}`;
   return async (req, res) => {
     try {
-      if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: `Invalid ${entity} id` });
+      if (!isObjectId(req.params.id)) return res.status(400).json({ success: false, message: `Invalid ${noun} id` });
       const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
       if (reason.length < 3 || reason.length > 500) {
         return res.status(400).json({ success: false, message: 'Give a reason for voiding (3-500 characters)' });
@@ -161,8 +165,8 @@ function voidHandler(Model, { entity, label, format }) {
       if (!record) {
         const exists = await Model.exists({ _id: req.params.id, orgId: req.user.orgId });
         return exists
-          ? res.status(400).json({ success: false, message: `This ${entity} is already void` })
-          : res.status(404).json({ success: false, message: `${entity[0].toUpperCase()}${entity.slice(1)} not found` });
+          ? res.status(400).json({ success: false, message: `This ${noun} is already void` })
+          : res.status(404).json({ success: false, message: `${Noun} not found` });
       }
 
       audit.record(req, {
@@ -177,7 +181,7 @@ function voidHandler(Model, { entity, label, format }) {
         note: reason,
       });
 
-      return res.json({ success: true, message: `${entity[0].toUpperCase()}${entity.slice(1)} voided`, data: format(record) });
+      return res.json({ success: true, message: `${Noun} voided`, data: format(record) });
     } catch (err) {
       console.error(`[${entity.toUpperCase()} VOID]`, err);
       return res.status(500).json({ success: false, message: 'Server error' });
