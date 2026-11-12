@@ -53,3 +53,7 @@ sitePaymentSchema.index(
 module.exports = mongoose.model('SitePayment', sitePaymentSchema);
 module.exports.CATEGORIES = CATEGORIES;
 module.exports.PAYMENT_MODES = PAYMENT_MODES;
+// The words the app shows, for messages the server writes itself (alerts).
+module.exports.CATEGORY_LABELS = {
+  labour: 'Labour', material: 'Material', purchase: 'Petty purchase', transport: 'Transport', other: 'Other',
+};

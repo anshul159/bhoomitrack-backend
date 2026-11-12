@@ -81,6 +81,23 @@ const userSchema = new mongoose.Schema({
   // ─── Push (ENH-014) ────────────────────────────────────────────────────────
   fcmTokens: { type: [deviceTokenSchema], default: [] },
 
+  // ─── Owner notifications (v2) ──────────────────────────────────────────────
+  // Both off until the owner turns them on. One more push a day is something to
+  // choose, not something to be given: PowerPlay's most specific one-star review
+  // is "each notification repeats 4-5 times. it's like a spammer app".
+  notificationPrefs: {
+    dailySummary: { type: Boolean, default: false },
+    // The hour, India time, after which the day's summary goes out.
+    dailySummaryHour: { type: Number, default: 20, min: 0, max: 23 },
+    largePaymentAlert: { type: Boolean, default: false },
+    // In rupees, like every amount in the product. Alerts at or above it.
+    largePaymentThreshold: { type: Number, default: 10000 },
+  },
+  // The India-time day (YYYY-MM-DD) the last daily summary was sent for. The
+  // scheduler claims a day by setting this atomically before sending, so a
+  // restart, or a second instance on the same tick, can never send it twice.
+  dailySummarySentFor: { type: String, default: null },
+
   // ─── Session revocation (ENH-012) ──────────────────────────────────────────
   // Baked into every JWT as `tv`. auth middleware rejects a token whose `tv` is
   // behind this value, so logout, a role change or a site removal invalidates
@@ -97,6 +114,12 @@ userSchema.index({ email: 1 });
 userSchema.index({ role: 1, status: 1, site_name: 1 });
 userSchema.index({ orgId: 1, role: 1, status: 1 });
 userSchema.index({ deletedAt: 1 });
+// The scheduler's question every few minutes: who has asked for a daily summary.
+// Partial, so the index holds only the owners who opted in.
+userSchema.index(
+  { 'notificationPrefs.dailySummary': 1, 'notificationPrefs.dailySummaryHour': 1 },
+  { name: 'daily_summary_optin', partialFilterExpression: { 'notificationPrefs.dailySummary': true } }
+);
 
 // ─── Identity uniqueness (PF-001) ───────────────────────────────────────────────
 //

@@ -19,6 +19,17 @@ function jpegBytes(size = 2048) {
   for (let i = 4; i < size; i++) b[i] = (i * 31) % 256;
   return b;
 }
+// Alerts and audit rows are written after the response has gone. Wait for what
+// is expected rather than for a fixed time: a fixed 60 ms wait failed once on a
+// busy machine.
+const until = async (check, ms = 3000) => {
+  const end = Date.now() + ms;
+  while (!(await check())) {
+    if (Date.now() > end) return;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+
 const asDataUri = (buf, type = 'image/jpeg') => `data:${type};base64,${buf.toString('base64')}`;
 
 const binaryParser = (res, cb) => {
@@ -191,8 +202,8 @@ describe('site payments (v2)', () => {
 
     // The record itself is still there.
     expect(await SitePayment.countDocuments({ _id: id })).toBe(1);
-    // Audit writes are fire-and-forget; give them a tick.
-    await new Promise((r) => setTimeout(r, 50));
+    // Audit writes are fire-and-forget: wait for both rows rather than a fixed time.
+    await until(async () => (await AuditLog.countDocuments({ entity_id: id })) >= 2);
     const actions = (await AuditLog.find({ entity_id: id }).lean()).map((a) => a.action).sort();
     expect(actions).toEqual(['payment.record', 'payment.void']);
   });

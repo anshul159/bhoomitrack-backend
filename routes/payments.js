@@ -6,6 +6,9 @@ const { ownerOnly, requireApproved } = require('../middleware/roles');
 const siteAccess = require('../middleware/siteAccess');
 const SitePayment = require('../models/SitePayment');
 const Attachment = require('../models/Attachment');
+const User = require('../models/User');
+const push = require('../utils/push');        // a module, not destructured: tests stand in for it
+const { formatRupees } = require('../utils/money');
 const { parsePaging, paginate } = require('../utils/pagination');
 const { decodeBillImage } = require('../utils/billImage');
 const audit = require('../utils/audit');
@@ -16,6 +19,31 @@ const {
 
 // Site payments (v2): money paid out at a site, with an optional photo of the bill.
 // A record, not a request — see models/SitePayment.js.
+
+/**
+ * Tells each owner who asked to hear about payments of this size (v2). Never the
+ * person who entered it, and never on a retried submission. Fire-and-forget: a
+ * push failure must not touch the response.
+ */
+async function alertLargePayment(req, payment) {
+  const owners = await User.find({
+    orgId: req.user.orgId,
+    role: { $in: ['owner', 'super_admin'] },
+    deletedAt: null,
+    _id: { $ne: req.user.id },
+    'notificationPrefs.largePaymentAlert': true,
+    'notificationPrefs.largePaymentThreshold': { $lte: payment.amount },
+  }, 'fcmTokens fcmToken').lean();
+  if (owners.length === 0) return;
+
+  await push.sendToUsers(
+    owners,
+    `${formatRupees(payment.amount)} paid at ${payment.site_name}`,
+    `To ${payment.paid_to} · ${SitePayment.CATEGORY_LABELS[payment.category] || payment.category}` +
+      ` · recorded by ${payment.recorded_by_name || 'a team member'}`,
+    { type: 'large_payment', paymentId: String(payment._id), siteName: payment.site_name }
+  );
+}
 
 const MAX_AMOUNT = 10_00_00_000; // ₹10 crore — above any single site payment; catches a stray extra zero or three.
 
@@ -129,6 +157,7 @@ router.post('/', requireApproved, async (req, res) => {
         site_name: site.name,
         after: { category: record.category, amount: record.amount, has_bill: Boolean(record.bill_attachment_id) },
       });
+      alertLargePayment(req, record).catch((err) => console.error('[PAYMENT ALERT]', err.message));
     }
 
     return res.json({

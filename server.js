@@ -332,6 +332,9 @@ if (require.main === module) {
     .then(() => {
       console.log('✅ Connected to MongoDB');
       app.listen(PORT, () => console.log(`🚀 BhoomiTrack server running on port ${PORT}`));
+      // The owners' daily summary (v2). Here, not at require time, so tests and
+      // scripts that load the app never start a timer.
+      require('./utils/scheduler').startScheduler();
     })
     .catch(err => {
       console.error('❌ MongoDB connection failed:', err.message);

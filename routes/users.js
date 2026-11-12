@@ -422,6 +422,98 @@ router.put('/me/material-defaults', auth, async (req, res) => {
   }
 });
 
+// ─── GET / PUT /api/users/me/notifications ────────────────────────────────────
+// An owner's own notification choices (v2): the daily summary and the
+// large-payment alert. Both start off; nothing here is pushed to anyone who did
+// not ask for it. Per person rather than per company, because two owners of one
+// company can reasonably want different things in their pocket.
+//
+// Owners only — managers receive neither notification.
+
+const DEFAULT_SUMMARY_HOUR = 20;
+const DEFAULT_PAYMENT_THRESHOLD = 10000;
+
+function notificationSettings(user) {
+  const p = user.notificationPrefs || {};
+  return {
+    daily_summary: Boolean(p.dailySummary),
+    daily_summary_hour: Number.isInteger(p.dailySummaryHour) ? p.dailySummaryHour : DEFAULT_SUMMARY_HOUR,
+    large_payment_alert: Boolean(p.largePaymentAlert),
+    large_payment_threshold: typeof p.largePaymentThreshold === 'number' ? p.largePaymentThreshold : DEFAULT_PAYMENT_THRESHOLD,
+    // The hour is India time; said out loud so no client has to assume it.
+    timezone: 'Asia/Kolkata',
+  };
+}
+
+const isOwnerLike = (role) => role === 'owner' || role === 'super_admin';
+
+router.get('/me/notifications', auth, async (req, res) => {
+  try {
+    if (!isOwnerLike(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Notification settings are for owners' });
+    }
+    const user = await User.findById(req.user.id).select('notificationPrefs deletedAt').lean();
+    if (!user || user.deletedAt) return res.status(404).json({ success: false, message: 'Account not found' });
+    return res.json({ success: true, message: 'OK', data: notificationSettings(user) });
+  } catch (err) {
+    console.error('[NOTIFICATIONS GET]', err);
+    captureError(err, { route: 'users.getNotifications' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
+// Partial: send only what changed. Each field is checked on its own, and nothing
+// is saved unless every field sent is valid.
+router.put('/me/notifications', auth, async (req, res) => {
+  try {
+    if (!isOwnerLike(req.user.role)) {
+      return res.status(403).json({ success: false, message: 'Notification settings are for owners' });
+    }
+    const body = req.body || {};
+    const set = {};
+
+    for (const [field, path] of [['daily_summary', 'dailySummary'], ['large_payment_alert', 'largePaymentAlert']]) {
+      if (body[field] === undefined) continue;
+      if (typeof body[field] !== 'boolean') {
+        return res.status(400).json({ success: false, message: `${field} must be true or false` });
+      }
+      set[`notificationPrefs.${path}`] = body[field];
+    }
+
+    if (body.daily_summary_hour !== undefined) {
+      const hour = body.daily_summary_hour;
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23) {
+        return res.status(400).json({ success: false, message: 'The summary hour must be a whole hour from 0 to 23' });
+      }
+      set['notificationPrefs.dailySummaryHour'] = hour;
+    }
+
+    if (body.large_payment_threshold !== undefined) {
+      const amount = Number(body.large_payment_threshold);
+      if (typeof body.large_payment_threshold !== 'number' || !Number.isFinite(amount) || amount <= 0 || amount > 1e9) {
+        return res.status(400).json({ success: false, message: 'The alert amount must be more than ₹0' });
+      }
+      set['notificationPrefs.largePaymentThreshold'] = Number(amount.toFixed(2));
+    }
+
+    if (Object.keys(set).length === 0) {
+      return res.status(400).json({ success: false, message: 'Nothing to change' });
+    }
+
+    const user = await User.findOneAndUpdate(
+      { _id: req.user.id, deletedAt: null },
+      { $set: set },
+      { new: true, runValidators: true, projection: 'notificationPrefs' }
+    ).lean();
+    if (!user) return res.status(404).json({ success: false, message: 'Account not found' });
+    return res.json({ success: true, message: 'Notification settings saved', data: notificationSettings(user) });
+  } catch (err) {
+    console.error('[NOTIFICATIONS SET]', err);
+    captureError(err, { route: 'users.setNotifications' });
+    res.status(500).json({ success: false, message: 'Server error' });
+  }
+});
+
 // ─── DELETE /api/users/me ─────────────────────────────────────────────────────
 // Account deletion (ENH-013). Google Play's data-safety declaration expects an
 // in-app deletion route and the DPDP Act gives users an erasure right.
