@@ -105,9 +105,9 @@ describe('progress updates (v2)', () => {
     expect((await postProgress(manager.token, { percent: 100 })).status).toBe(200);
   });
 
-  it('pins a manager to their own site, and lets an owner report for any site', async () => {
+  it('pins a manager to their own site, and refuses an owner', async () => {
     const { org, owner, manager } = await createWorld();
-    const other = await createSite(org, 'Site B');
+    await createSite(org, 'Site B');
 
     const refused = await postProgress(manager.token, { site_name: 'Site B', percent: 20 });
     expect(refused.status).toBe(403);
@@ -115,13 +115,14 @@ describe('progress updates (v2)', () => {
     const unassigned = await createManager(org, null);
     expect((await postProgress(unassigned.token, { percent: 20 })).status).toBe(400);
 
+    // The engineer reports progress; an owner only sees it (and may void it).
     const byOwner = await postProgress(owner.token, { site_name: 'Site B', percent: 20 });
-    expect(byOwner.status).toBe(200);
-    expect(byOwner.body.data.site_id).toBe(String(other._id));
-    expect(byOwner.body.data.recorded_by_role).toBe('owner');
-
-    // An owner must say which site.
-    expect((await postProgress(owner.token, { percent: 20 })).status).toBe(404);
+    expect(byOwner.status).toBe(403);
+    expect(byOwner.body.message).toMatch(/reported by the site engineer/);
+    // A retry carrying a request id is refused the same way, not replayed.
+    const retried = await postProgress(owner.token, { site_name: 'Site B', percent: 20, client_request_id: 'owner-progress-1' });
+    expect(retried.status).toBe(403);
+    expect(await ProgressUpdate.countDocuments({ orgId: org._id })).toBe(0);
   });
 
   it('keeps one update and one photo when the same submission is retried', async () => {
@@ -412,9 +413,12 @@ describe('site budgets (v2)', () => {
 describe('every site’s budget and progress (v2)', () => {
   it('lists every site worst first, with counts by status', async () => {
     const { org, owner, manager } = await createWorld();     // Site A
-    await createSite(org, 'Site B');
-    await createSite(org, 'Site C');
+    const siteB = await createSite(org, 'Site B');
+    const siteC = await createSite(org, 'Site C');
     const siteD = await createSite(org, 'Site D');
+    // Progress is the engineer's to report, so B and C each get theirs.
+    const engineerB = await createManager(org, siteB);
+    const engineerC = await createManager(org, siteC);
 
     // A: over budget. B: running hot. C: on track. D: no budget at all.
     await putBudget(owner.token, 'Site A', { amount: 100000 });
@@ -422,12 +426,12 @@ describe('every site’s budget and progress (v2)', () => {
 
     await putBudget(owner.token, 'Site B', { amount: 1000000 });
     await pay(owner.token, 600000, { site_name: 'Site B' });
-    await postProgress(owner.token, { site_name: 'Site B', percent: 40 });
+    await postProgress(engineerB.token, { percent: 40 });
 
     await putBudget(owner.token, 'Site C', { amount: 1000000 });
     await pay(owner.token, 300000, { site_name: 'Site C' });
     // Progress last reported ten days ago: stale.
-    await postProgress(owner.token, { site_name: 'Site C', percent: 30, as_of: new Date(Date.now() - 10 * DAY).toISOString() });
+    await postProgress(engineerC.token, { percent: 30, as_of: new Date(Date.now() - 10 * DAY).toISOString() });
 
     const res = await request(app).get('/api/budgets').set(bearer(owner.token));
     expect(res.status).toBe(200);

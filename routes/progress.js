@@ -14,7 +14,8 @@ const {
 } = require('../utils/siteRecords');
 
 // Progress updates (v2): how much of a site's work is done, reported every few
-// days by its engineer or an owner. A record, not a request — see
+// days by its engineer (the site's manager). Owners see it and may void a wrong
+// update, but do not record it, so the history only ever shows the engineer. A record, not a request — see
 // models/ProgressUpdate.js. Owners compare it with the budget through
 // /api/budgets; managers see the updates but never the budget.
 
@@ -50,8 +51,14 @@ const latestRecorded = (orgId, siteId) =>
   ProgressUpdate.findOne({ orgId, site_id: siteId, status: 'recorded' }).sort({ as_of: -1, createdAt: -1, _id: -1 });
 
 // ─── POST /api/progress ───────────────────────────────────────────────────────
-// A manager records for their own site; an owner for any site.
+// A manager records for their own site. Owners are refused (BT-220): the
+// engineer reports how far the work has got, the owner compares it with the money.
+const OWNER_REFUSAL = 'Progress is reported by the site engineer. Owners see it and can void a wrong update.';
+
 router.post('/', requireApproved, async (req, res) => {
+  if (req.user.role !== 'manager') {
+    return res.status(403).json({ success: false, message: OWNER_REFUSAL });
+  }
   let attachment = null;
   try {
     const body = req.body || {};
