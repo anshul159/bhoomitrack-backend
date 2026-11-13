@@ -22,6 +22,9 @@ const sitePaymentSchema = new mongoose.Schema({
   amount: { type: Number, required: true },
   paid_to: { type: String, required: true, trim: true },
   payment_mode: { type: String, enum: [...PAYMENT_MODES, null], default: null },
+  // Cheque number, UPI/UTR reference, or bill/voucher number (CR-002 §4), so an
+  // owner can match the record against a bank statement. Optional free text.
+  reference_no: { type: String, default: '' },
   paid_on: { type: Date, required: true },
   note: { type: String, default: '' },
 

@@ -91,7 +91,20 @@ describe('site payments (v2)', () => {
     expect(res.body.data.has_bill).toBe(false);
     expect(res.body.data.bill_attachment_id).toBeNull();
     expect(res.body.data.contractor_name).toBe('');
+    expect(res.body.data.reference_no).toBe('');
     expect(await Attachment.countDocuments()).toBe(0);
+  });
+
+  it('keeps a reference number (cheque, UTR, bill), trimmed, and returns it in the list', async () => {
+    const { manager } = await createWorld();
+    const res = await request(app).post('/api/payments').set(bearer(manager.token))
+      .send(payment({ payment_mode: 'cheque', reference_no: '  CHQ 004512  ' }));
+    expect(res.status).toBe(200);
+    expect(res.body.data.reference_no).toBe('CHQ 004512');
+    expect((await SitePayment.findById(res.body.data.id).lean()).reference_no).toBe('CHQ 004512');
+
+    const list = await request(app).get('/api/payments/Site A').set(bearer(manager.token));
+    expect(list.body.data[0].reference_no).toBe('CHQ 004512');
   });
 
   it('pins a manager to their own sites, and lets an owner record for any site', async () => {
@@ -119,6 +132,8 @@ describe('site payments (v2)', () => {
     [{ paid_on: '2999-01-01' }, /future/],
     [{ paid_on: 'yesterday-ish' }, /valid date/],
     [{ contractor_phone: '12345' }, /10-digit/],
+    [{ reference_no: 'x'.repeat(61) }, /Reference number must be 60 characters/],
+    [{ reference_no: 12345 }, /Reference number must be text/],
     [{ bill_image: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=' }, /JPEG, PNG or WebP/],
     [{ bill_image: asDataUri(Buffer.from('<html>not an image</html>')) }, /not a valid image/],
   ])('refuses %j', async (override, message) => {
