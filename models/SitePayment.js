@@ -47,6 +47,9 @@ const sitePaymentSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 sitePaymentSchema.index({ orgId: 1, site_id: 1, paid_on: -1 });
+// The org-wide money queries (records summary, budget portfolio, the evening
+// summary) filter on status across every site, which the index above cannot serve.
+sitePaymentSchema.index({ orgId: 1, status: 1, paid_on: -1 });
 // Same shape as the slip index (PF-003): a retried submission on a bad
 // connection returns the original record instead of paying twice on paper.
 sitePaymentSchema.index(

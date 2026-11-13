@@ -47,6 +47,8 @@ const materialArrivalSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 materialArrivalSchema.index({ orgId: 1, site_id: 1, received_on: -1 });
+// Org-wide summaries filter on status across every site (see SitePayment).
+materialArrivalSchema.index({ orgId: 1, status: 1, received_on: -1 });
 materialArrivalSchema.index(
   { orgId: 1, client_request_id: 1 },
   { unique: true, name: 'arrival_client_request_unique', partialFilterExpression: { client_request_id: { $type: 'string' } } }
