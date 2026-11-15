@@ -130,4 +130,21 @@ function buildCompanyFile(profile, sites, documents, now = new Date()) {
   };
 }
 
-module.exports = { buildCompanyFile, slotStatus, documentState, daysUntil, ruleProfile, presentFile, EXPIRING_DAYS };
+/** The company file for one organisation, read from the database. */
+async function loadCompanyFile(orgId, now = new Date()) {
+  const Organization = require('../models/Organization');
+  const Site = require('../models/Site');
+  const CompanyDocument = require('../models/CompanyDocument');
+  const [org, sites, documents] = await Promise.all([
+    Organization.findById(orgId, 'profile services').lean(),
+    Site.find({ orgId }, '_id name').sort({ name: 1 }).lean(),
+    CompanyDocument.find({ orgId, status: 'active' }).lean(),
+  ]);
+  return { org, file: buildCompanyFile(org?.profile || {}, sites, documents, now) };
+}
+
+/** The slots that are in place or expiring, for the calendar's applies(). */
+const inPlaceSlots = (file) => new Set(file.groups.flatMap((g) => g.slots)
+  .filter((s) => s.status === 'in_place' || s.status === 'expiring').map((s) => s.slot));
+
+module.exports = { loadCompanyFile, inPlaceSlots, buildCompanyFile, slotStatus, documentState, daysUntil, ruleProfile, presentFile, EXPIRING_DAYS };

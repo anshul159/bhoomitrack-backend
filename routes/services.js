@@ -13,6 +13,10 @@ const { isObjectId } = require('../utils/validate');
 const { clientRequestId, createOnce, ValidationError } = require('../utils/siteRecords');
 const sr = require('../utils/serviceRequests');
 const { captureError } = require('../utils/observability');
+const { loadCompanyFile, inPlaceSlots } = require('../utils/companyFile');
+const { allSignals, topSignals } = require('../utils/serviceSignals');
+const { indiaClock } = require('../utils/dailySummary');
+const { presentProfile } = require('../utils/orgProfile');
 
 // BhoomiTrack Services (plan §6.2): the owner's Services tab. Owner only, every
 // route — the tab, the company file and every request are the business's own
@@ -31,6 +35,104 @@ function fail(res, err, route) {
 }
 
 const orgProfile = async (orgId) => (await Organization.findById(orgId, 'profile').lean())?.profile || {};
+
+/** 1 April of the current Indian financial year, as an instant (India midnight). */
+function financialYearStart(now = new Date()) {
+  const { day } = indiaClock(now);
+  const y = Number(day.slice(0, 4));
+  const startYear = Number(day.slice(5, 7)) >= 4 ? y : y - 1;
+  return new Date(Date.UTC(startYear, 3, 1) - (5 * 60 + 30) * 60 * 1000);
+}
+
+// ─── GET /api/services/home ───────────────────────────────────────────────────
+// Everything the Services tab shows, in one call (plan §5.3): the company file's
+// summary, at most two suggestions, the open requests, the year's savings, and
+// the tab's badge.
+router.get('/home', async (req, res) => {
+  try {
+    const now = new Date();
+    const orgId = req.user.orgId;
+    const { org, file } = await loadCompanyFile(orgId, now);
+
+    const signals = topSignals(
+      allSignals(file, { profile: presentProfile(org?.profile), inPlace: inPlaceSlots(file) }, indiaClock(now).day),
+      org?.services?.dismissed || [],
+      now
+    );
+
+    const since = financialYearStart(now);
+    const [open, saved] = await Promise.all([
+      ServiceRequest.find({ orgId, status: { $in: ServiceRequest.OPEN_STATUSES } }).sort({ updatedAt: -1 }).limit(20).lean(),
+      ServiceRequest.aggregate([
+        { $match: { orgId: org?._id || null, status: 'done', 'outcome.saved_paise': { $gt: 0 }, updatedAt: { $gte: since } } },
+        { $group: { _id: null, total: { $sum: '$outcome.saved_paise' }, count: { $sum: 1 } } },
+      ]),
+    ]);
+    const waiting = open.filter((r) => r.status === 'options_ready').length;
+
+    return res.json({
+      success: true,
+      data: {
+        company_file: { score: file.score, counts: file.counts, questions: file.questions },
+        signals,
+        requests: open.map(sr.presentRequestRow),
+        savings: { since: since.toISOString(), total_paise: saved[0]?.total || 0, count: saved[0]?.count || 0 },
+        // Only what needs the owner (plan §5.2): a choice to make, a paper that has run out.
+        badge: waiting + file.counts.expired,
+      },
+    });
+  } catch (err) {
+    return fail(res, err, 'home');
+  }
+});
+
+// ─── GET /api/services/savings ────────────────────────────────────────────────
+// The list behind "Saved with BhoomiTrack this year", each with how it was worked out.
+router.get('/savings', async (req, res) => {
+  try {
+    const since = financialYearStart();
+    const rows = await ServiceRequest.find({
+      orgId: req.user.orgId, status: 'done', 'outcome.saved_paise': { $gt: 0 }, updatedAt: { $gte: since },
+    }).sort({ updatedAt: -1 }).lean();
+    return res.json({
+      success: true,
+      data: {
+        since: since.toISOString(),
+        total_paise: rows.reduce((n, r) => n + r.outcome.saved_paise, 0),
+        items: rows.map((r) => ({
+          id: r._id, number: r.number, title: r.title, site_name: r.site_name || '',
+          saved_paise: r.outcome.saved_paise, saved_basis: r.outcome.saved_basis, done_at: r.updatedAt,
+        })),
+      },
+    });
+  } catch (err) {
+    return fail(res, err, 'savings');
+  }
+});
+
+// ─── POST /api/services/signals/:id/dismiss ───────────────────────────────────
+// Hides one suggestion for 30 days (plan §5.1 rule 6).
+const DISMISS_DAYS = 30;
+router.post('/signals/:id/dismiss', async (req, res) => {
+  try {
+    const signalId = String(req.params.id || '');
+    if (!/^[a-z_]+:[A-Za-z0-9_.:-]{0,120}$/.test(signalId)) {
+      return res.status(400).json({ success: false, message: 'Invalid suggestion' });
+    }
+    const now = new Date();
+    const until = new Date(now.getTime() + DISMISS_DAYS * 24 * 60 * 60 * 1000);
+    // Drop this one and anything already lapsed, then add it back with a fresh date.
+    await Organization.updateOne({ _id: req.user.orgId }, {
+      $pull: { 'services.dismissed': { $or: [{ signal_id: signalId }, { until: { $lte: now } }] } },
+    });
+    await Organization.updateOne({ _id: req.user.orgId }, {
+      $push: { 'services.dismissed': { signal_id: signalId, until } },
+    });
+    return res.json({ success: true, message: 'Hidden for 30 days', data: { signal_id: signalId, until } });
+  } catch (err) {
+    return fail(res, err, 'dismiss');
+  }
+});
 
 // ─── GET /api/services/catalogue ──────────────────────────────────────────────
 router.get('/catalogue', async (req, res) => {

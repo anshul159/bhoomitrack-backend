@@ -4,11 +4,10 @@ const multer = require('multer');
 const router = express.Router();
 // No `auth` here on purpose — applied at the mount in server.js (PF-007).
 const { ownerOnly } = require('../middleware/roles');
-const Organization = require('../models/Organization');
 const CompanyDocument = require('../models/CompanyDocument');
 const Site = require('../models/Site');
 const { getRule, isKnownSlot, OTHER_SLOT } = require('../config/companyFileRules');
-const { buildCompanyFile, presentFile } = require('../utils/companyFile');
+const { loadCompanyFile, presentFile } = require('../utils/companyFile');
 const { storage, StorageUnavailableError } = require('../utils/storage');
 const audit = require('../utils/audit');
 const { isObjectId } = require('../utils/validate');
@@ -96,13 +95,8 @@ const findDoc = (req) => (isObjectId(req.params.id)
 // ─── GET /api/company-file ────────────────────────────────────────────────────
 router.get('/', async (req, res) => {
   try {
-    const orgId = req.user.orgId;
-    const [org, sites, documents] = await Promise.all([
-      Organization.findById(orgId, 'profile').lean(),
-      Site.find({ orgId }, '_id name').sort({ name: 1 }).lean(),
-      CompanyDocument.find({ orgId, status: 'active' }).lean(),
-    ]);
-    return res.json({ success: true, data: buildCompanyFile(org?.profile || {}, sites, documents) });
+    const { file } = await loadCompanyFile(req.user.orgId);
+    return res.json({ success: true, data: file });
   } catch (err) {
     return fail(res, err, 'get');
   }
