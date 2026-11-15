@@ -14,6 +14,9 @@ const MaterialArrival = require('../models/MaterialArrival');
 const Attachment = require('../models/Attachment');
 const ProgressUpdate = require('../models/ProgressUpdate');
 const SiteBudget = require('../models/SiteBudget');
+const CompanyDocument = require('../models/CompanyDocument');
+const ServiceRequest = require('../models/ServiceRequest');
+const { storage } = require('../utils/storage');
 const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const audit = require('../utils/audit');
@@ -408,7 +411,7 @@ router.get('/export',ownerOnly, async (req, res) => {
   // counts and cheap.
   let counts;
   try {
-    const [sites, inventory, slips, orders, users, auditLog, payments, arrivals, attachments, progress, budgets] = await Promise.all([
+    const [sites, inventory, slips, orders, users, auditLog, payments, arrivals, attachments, progress, budgets, companyDocuments, serviceRequests] = await Promise.all([
       Site.countDocuments({ orgId }),
       Inventory.countDocuments({ orgId }),
       Slip.countDocuments({ orgId }),
@@ -420,9 +423,12 @@ router.get('/export',ownerOnly, async (req, res) => {
       Attachment.countDocuments({ orgId }),
       ProgressUpdate.countDocuments({ orgId }),
       SiteBudget.countDocuments({ orgId }),
+      CompanyDocument.countDocuments({ orgId, not_needed: false }),
+      ServiceRequest.countDocuments({ orgId }),
     ]);
     counts = {
       sites, inventory, slips, orders, users, payments, arrivals, attachments, progress, budgets,
+      company_documents: companyDocuments, service_requests: serviceRequests,
       audit_log: Math.min(auditLog, AUDIT_EXPORT_LIMIT),
       audit_log_total: auditLog,
     };
@@ -490,6 +496,34 @@ router.get('/export',ownerOnly, async (req, res) => {
     // records as much as the payments are, and the export is the only way out.
     await streamArray('attachments', Attachment.find({ orgId }).select('+data'));
     await write(',');
+    // The company file (BhoomiTrack Services): each paper's details and a manifest
+    // of its files. The files themselves can be up to 10 MB each, so they are not
+    // inlined; each manifest entry names the API path that serves it to the owner.
+    {
+      await write('"company_documents":[');
+      let first = true;
+      const cursor = CompanyDocument.find({ orgId, not_needed: false }).lean().cursor();
+      try {
+        for await (const doc of cursor) {
+          const { files, reminders_sent, ...rest } = doc;
+          const entry = {
+            ...rest,
+            files: (files || []).map((f, n) => ({
+              n, content_type: f.content_type, size: f.size,
+              path: `/api/company-file/documents/${doc._id}/file/${n}`,
+            })),
+          };
+          await write((first ? '' : ',') + JSON.stringify(entry));
+          first = false;
+        }
+      } finally {
+        await cursor.close();
+      }
+      await write('],');
+    }
+    // Every service request, with what was shared, the messages and the outcome.
+    await streamArray('service_requests', ServiceRequest.find({ orgId }));
+    await write(',');
     // Credentials and push tokens are deliberately not exported.
     await streamArray('users', User.find(
       { orgId },
@@ -537,10 +571,26 @@ router.delete('/',ownerOnly, async (req, res) => {
 
     const orgId = org._id;
     const counts = {};
+
+    // The company file's stored files go first, while we still know where they
+    // are. If storage cannot delete them, nothing else is deleted either, so the
+    // owner can try again rather than leave papers behind with no row pointing at
+    // them (a privacy commitment, plan §4.6).
+    const docs = await CompanyDocument.find({ orgId }, 'files').lean();
+    const keys = docs.flatMap((d) => (d.files || []).map((f) => f.key));
+    try {
+      for (const key of keys) await storage().delete(key);
+    } catch (err) {
+      captureError(err, { route: 'org.delete', step: 'storage' });
+      return res.status(503).json({ success: false, message: 'Your documents could not be deleted just now. Nothing has been deleted. Please try again.' });
+    }
+    counts.company_files = keys.length;
+
     for (const [key, Model] of Object.entries({
       inventory: Inventory, slips: Slip, orders: Order, sites: Site, users: User, audit: AuditLog,
       payments: SitePayment, arrivals: MaterialArrival, attachments: Attachment,
       progress: ProgressUpdate, budgets: SiteBudget,
+      company_documents: CompanyDocument, service_requests: ServiceRequest,
     })) {
       const r = await Model.deleteMany({ orgId });
       counts[key] = r.deletedCount;

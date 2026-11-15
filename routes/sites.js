@@ -12,6 +12,7 @@ const Slip = require('../models/Slip');
 const Order = require('../models/Order');
 const SitePayment = require('../models/SitePayment');
 const MaterialArrival = require('../models/MaterialArrival');
+const ServiceRequest = require('../models/ServiceRequest');
 const ProgressUpdate = require('../models/ProgressUpdate');
 const User = require('../models/User');
 const audit = require('../utils/audit');
@@ -218,6 +219,7 @@ router.put('/rename/:id',ownerOnly, async (req, res) => {
         SitePayment.updateMany({ orgId, site_id: site._id }, { $set: { site_name: newName } }),
         MaterialArrival.updateMany({ orgId, site_id: site._id }, { $set: { site_name: newName } }),
         ProgressUpdate.updateMany({ orgId, site_id: site._id }, { $set: { site_name: newName } }),
+        ServiceRequest.updateMany({ orgId, site_id: site._id }, { $set: { site_name: newName } }),
       ]);
       const managers = await User.updateMany(
         { orgId, $or: [{ site_ids: site._id }, { site_name: oldName }] },
