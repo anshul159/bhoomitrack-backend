@@ -18,6 +18,8 @@ const User = require('../models/User');
 const AuditLog = require('../models/AuditLog');
 const audit = require('../utils/audit');
 const { isNonEmptyString, isObjectId } = require('../utils/validate');
+const { parseProfileUpdate, presentProfile } = require('../utils/orgProfile');
+const { isOwnerRole } = require('../utils/siteRecords');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
@@ -40,10 +42,11 @@ router.get('/',async (req, res) => {
   try {
     const org = await Organization.findById(req.user.orgId).lean();
     if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
-    return res.json({
-      success: true,
-      data: { id: org._id, name: org.name, currency: org.currency || 'INR' },
-    });
+    const data = { id: org._id, name: org.name, currency: org.currency || 'INR' };
+    // The profile carries the company's GSTIN, PAN and worker counts: owner only,
+    // like everything else in the Services tab.
+    if (isOwnerRole(req.user)) data.profile = presentProfile(org.profile);
+    return res.json({ success: true, data });
   } catch (err) {
     res.status(500).json({ success: false, message: 'Server error' });
   }
@@ -325,22 +328,40 @@ router.put('/settings',ownerOnly, async (req, res) => {
     const org = await Organization.findById(req.user.orgId);
     if (!org) return res.status(404).json({ success: false, message: 'Organisation not found' });
 
+    // The profile (BhoomiTrack Services) is a partial update: only the fields
+    // sent are touched, and one bad field refuses the whole write.
+    let profileUpdate = null;
+    if (req.body?.profile !== undefined) {
+      profileUpdate = parseProfileUpdate(req.body.profile);
+      if (profileUpdate.error) {
+        return res.status(400).json({ success: false, message: profileUpdate.error, field: profileUpdate.field });
+      }
+    }
+
+    const beforeProfile = presentProfile(org.profile);
     const before = { name: org.name, currency: org.currency };
     if (isNonEmptyString(req.body?.name, 200)) org.name = req.body.name.trim();
     if (isNonEmptyString(req.body?.currency, 8)) org.currency = req.body.currency.trim().toUpperCase();
+    if (profileUpdate) {
+      for (const [k, v] of Object.entries(profileUpdate.set)) org.set(`profile.${k}`, v);
+      for (const k of profileUpdate.unset) org.set(`profile.${k}`, Array.isArray(beforeProfile[k]) ? [] : null);
+    }
     await org.save();
 
+    const profile = presentProfile(org.profile);
+    const changed = audit.diff(beforeProfile, profile, Object.keys(profile));
     audit.record(req, {
       action: 'org.update',
       entity: 'organization',
       entity_id: org._id,
       entity_label: org.name,
-      before,
-      after: { name: org.name, currency: org.currency },
+      before: { ...before, ...(changed ? { profile: changed.before } : {}) },
+      after: { name: org.name, currency: org.currency, ...(changed ? { profile: changed.after } : {}) },
     });
 
-    return res.json({ success: true, message: 'Saved', data: { name: org.name, currency: org.currency } });
+    return res.json({ success: true, message: 'Saved', data: { name: org.name, currency: org.currency, profile } });
   } catch (err) {
+    captureError(err, { route: 'org.settings' });
     res.status(500).json({ success: false, message: 'Server error' });
   }
 });
@@ -443,6 +464,7 @@ router.get('/export',ownerOnly, async (req, res) => {
     await write(`"organization":${JSON.stringify({
       id: org._id, name: org.name, currency: org.currency,
       plan: org.plan, status: org.status, created_at: org.createdAt,
+      profile: presentProfile(org.profile),
     })},`);
     await write(`"counts":${JSON.stringify(counts)},`);
 

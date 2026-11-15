@@ -62,6 +62,41 @@ const organizationSchema = new mongoose.Schema({
     note: { type: String, default: '' },
   },
 
+  // ─── Profile (BhoomiTrack Services) ────────────────────────────────────────
+  //
+  // What the business is, as far as the company file and the service catalogue
+  // need to know. Every field is optional and asked for late, by the first screen
+  // that needs it (utils/orgProfile.js validates). Distinct from billing.gstin,
+  // which is the GSTIN on BhoomiTrack's own invoices to this customer: the two are
+  // usually the same number, but they answer different questions and are kept
+  // apart so one cannot silently change the other.
+  profile: {
+    entity_type: { type: String, default: null },
+    gstin: { type: String, default: null },
+    pan: { type: String, default: null },
+    state: { type: String, default: null },
+    district: { type: String, default: null },
+    work_types: { type: [String], default: undefined },
+    client_types: { type: [String], default: undefined },
+    own_workers: { type: Number, default: null },
+    contract_workers: { type: Number, default: null },
+    vehicles: { type: Number, default: null },
+    turnover_band: { type: String, default: null },
+    udyam_no: { type: String, default: null },
+  },
+
+  // The Services tab's own memory: suggestions the owner dismissed, each hidden
+  // until a date (30 days, plan §5.1 rule 6).
+  services: {
+    dismissed: {
+      type: [new mongoose.Schema({
+        signal_id: { type: String, required: true },
+        until: { type: Date, required: true },
+      }, { _id: false })],
+      default: [],
+    },
+  },
+
   // ─── Super Admin transfer in flight (WEB-APP-PLAN §7.1) ────────────────────
   //
   // The OTP lives HERE and deliberately NOT on User.otpHash, which password reset
