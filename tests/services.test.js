@@ -272,6 +272,7 @@ describe('a request moving through the desk', () => {
     await sr.deskMarkDone(DESK, r.id, { fee_rupees: 1000 });
     res = await request(app).post(`/api/services/requests/${r.id}/rating`).set(bearer(owner.token)).send({ rating: 'good' });
     expect(res.status).toBe(200);
+    expect(res.body.data.rating).toBe('good');
     res = await request(app).post(`/api/services/requests/${r.id}/rating`).set(bearer(owner.token)).send({ rating: 'bad' });
     expect(res.status).toBe(409);
   });

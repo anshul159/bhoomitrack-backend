@@ -273,6 +273,7 @@ function presentRequest(r) {
       saved_paise: r.outcome?.saved_paise ?? null,
       saved_basis: r.outcome?.saved_basis || '',
     },
+    rating: r.rating || null,
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
