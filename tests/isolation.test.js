@@ -74,6 +74,28 @@ describe('organisation isolation', () => {
   });
 });
 
+// BhoomiTrack Services: requests are the business's own affairs.
+describe('service requests isolation', () => {
+  it("cannot list, read, cancel or message another organisation's service request", async () => {
+    const a = await createWorld();
+    const b = await createWorld();
+    const made = await request(app).post('/api/services/requests').set(bearer(b.owner.token))
+      .send({ service_id: 'experts.lawyer', consent: true, details: { question: 'Cheque bounced' } });
+    const id = made.body.data.id;
+
+    const list = await request(app).get('/api/services/requests?state=all').set(bearer(a.owner.token));
+    expect(list.body.data).toHaveLength(0);
+    for (const [method, path] of [
+      ['get', `/api/services/requests/${id}`],
+      ['post', `/api/services/requests/${id}/cancel`],
+      ['post', `/api/services/requests/${id}/messages`],
+    ]) {
+      const res = await request(app)[method](path).set(bearer(a.owner.token)).send({ text: 'x' });
+      expect([path, res.status]).toEqual([path, 404]);
+    }
+  });
+});
+
 // ENH-024 — the API used to trust the app to send the right site.
 describe('site scope for managers', () => {
   it('lets a manager read their own site', async () => {

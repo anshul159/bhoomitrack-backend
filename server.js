@@ -243,6 +243,10 @@ function mountRoutes(base) {
   // there. Budgets are owner only (enforced in the route); progress is both roles.
   app.use(`${base}/progress`,     ...orgGuard, require('./routes/progress'));
   app.use(`${base}/budgets`,      ...orgGuard, require('./routes/budgets'));
+
+  // BhoomiTrack Services: the owner's Services tab — the catalogue, service
+  // requests, and (below) the company file. Owner only, enforced in the routes.
+  app.use(`${base}/services`,     ...orgGuard, require('./routes/services'));
 }
 
 mountRoutes('/api/v1');
