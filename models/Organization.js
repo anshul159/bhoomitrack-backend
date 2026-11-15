@@ -88,6 +88,9 @@ const organizationSchema = new mongoose.Schema({
   // The Services tab's own memory: suggestions the owner dismissed, each hidden
   // until a date (30 days, plan §5.1 rule 6).
   services: {
+    // Due-date reminders already pushed, as '<calendar id>:<due day>', so each
+    // goes once (utils/reminders.js).
+    reminders_sent: { type: [String], default: [] },
     dismissed: {
       type: [new mongoose.Schema({
         signal_id: { type: String, required: true },

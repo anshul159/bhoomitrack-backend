@@ -1,4 +1,5 @@
-// The API's only recurring job (v2): the owner's daily summary.
+// The API's recurring jobs: the owner's daily summary (v2), and the company
+// file's expiry and due-date reminders (BhoomiTrack Services).
 //
 // There was no scheduler at all before this (constraint 7 in the architecture
 // review). This is deliberately the smallest one that is safe: a timer inside the
@@ -10,6 +11,7 @@
 // Started only when server.js runs as the real server, never under tests.
 
 const { sendDailySummaries } = require('./dailySummary');
+const { sendServiceReminders } = require('./reminders');
 const { captureError } = require('./observability');
 
 const EVERY_MS = 5 * 60 * 1000;      // a summary arrives within 5 minutes of the chosen hour
@@ -27,11 +29,21 @@ function startScheduler({ everyMs = EVERY_MS, firstRunMs = FIRST_RUN_MS } = {}) 
     if (running) return;              // a slow run is never overlapped by the next
     running = true;
     try {
-      const { sent, day } = await sendDailySummaries();
-      if (sent > 0) console.log(`[SCHEDULER] Daily summary sent to ${sent} owner(s) for ${day}.`);
-    } catch (err) {
-      console.error('[SCHEDULER] Daily summary run failed:', err.message);
-      captureError(err, { kind: 'scheduler', job: 'dailySummary' });
+      // Each job on its own: one failing must not stop the other.
+      try {
+        const { sent, day } = await sendDailySummaries();
+        if (sent > 0) console.log(`[SCHEDULER] Daily summary sent to ${sent} owner(s) for ${day}.`);
+      } catch (err) {
+        console.error('[SCHEDULER] Daily summary run failed:', err.message);
+        captureError(err, { kind: 'scheduler', job: 'dailySummary' });
+      }
+      try {
+        const { expiries, due_dates: dueDates } = await sendServiceReminders();
+        if (expiries + dueDates > 0) console.log(`[SCHEDULER] Reminders sent: ${expiries} expiring document(s), ${dueDates} due date(s).`);
+      } catch (err) {
+        console.error('[SCHEDULER] Reminder run failed:', err.message);
+        captureError(err, { kind: 'scheduler', job: 'serviceReminders' });
+      }
     } finally {
       running = false;
     }
@@ -43,7 +55,7 @@ function startScheduler({ everyMs = EVERY_MS, firstRunMs = FIRST_RUN_MS } = {}) 
   const timer = setInterval(tick, everyMs);
   timer.unref();
   const every = everyMs >= 60000 ? `${Math.round(everyMs / 60000)} min` : `${Math.round(everyMs / 1000)} s`;
-  console.log(`[SCHEDULER] Daily summaries checked every ${every}.`);
+  console.log(`[SCHEDULER] Daily summaries and reminders checked every ${every}.`);
   return () => { clearTimeout(first); clearInterval(timer); };
 }
 
