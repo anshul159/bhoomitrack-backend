@@ -130,7 +130,8 @@ async function cancel(req, id, reason) {
 async function addMessage(actor, filter, text) {
   const clean = cleanText(text);
   if (clean.length === 0) throw new RequestError('Write a message first');
-  const byName = actor.req ? actor.req.user.name || '' : actor.desk;
+  // The customer exports their requests, so a desk message never names the founder.
+  const byName = actor.req ? actor.req.user.name || '' : 'BhoomiTrack';
   const message = { at: new Date(), from: byOf(actor), text: clean, by_name: byName };
   const closed = ['done', 'cancelled', 'declined'];
   const updated = await ServiceRequest.findOneAndUpdate(
