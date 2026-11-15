@@ -247,6 +247,7 @@ function mountRoutes(base) {
   // BhoomiTrack Services: the owner's Services tab — the catalogue, service
   // requests, and (below) the company file. Owner only, enforced in the routes.
   app.use(`${base}/services`,     ...orgGuard, require('./routes/services'));
+  app.use(`${base}/company-file`, ...orgGuard, require('./routes/companyFile'));
 }
 
 mountRoutes('/api/v1');

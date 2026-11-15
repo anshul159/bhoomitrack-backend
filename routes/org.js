@@ -344,7 +344,8 @@ router.put('/settings',ownerOnly, async (req, res) => {
     if (isNonEmptyString(req.body?.currency, 8)) org.currency = req.body.currency.trim().toUpperCase();
     if (profileUpdate) {
       for (const [k, v] of Object.entries(profileUpdate.set)) org.set(`profile.${k}`, v);
-      for (const k of profileUpdate.unset) org.set(`profile.${k}`, Array.isArray(beforeProfile[k]) ? [] : null);
+      // A cleared list goes back to "not answered", not to "answered: none".
+      for (const k of profileUpdate.unset) org.set(`profile.${k}`, Array.isArray(beforeProfile[k]) ? undefined : null);
     }
     await org.save();
 
