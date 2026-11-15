@@ -207,7 +207,7 @@ describe('a request moving through the desk', () => {
     const actions = (await AuditLog.find({ entity: 'service_request' }).lean()).map((a) => a.action);
     for (const a of ['create', 'status', 'option', 'choose', 'done']) expect(actions).toContain(`service_request.${a}`);
     const deskRow = await AuditLog.findOne({ action: 'service_request.done' }).lean();
-    expect(deskRow.actor_name).toBe('BhoomiTrack desk (Prerna)');
+    expect(deskRow.actor_name).toBe('BhoomiTrack desk');    // which founder is not the customer's to see
   });
 
   it('refuses a saving with no basis', async () => {

@@ -32,11 +32,13 @@ const cleanText = (v, max = MAX_MESSAGE) => (typeof v === 'string' ? v.trim().sl
 
 // ─── Who did it ───────────────────────────────────────────────────────────────
 // An actor is either the owner, from a request (`{ req }`), or the desk
-// (`{ desk: 'Prerna' }`). The desk is not a User of the customer's organisation,
-// so its audit rows carry no actor_id and say who at BhoomiTrack acted.
+// (`{ desk: 'founder@…' }`). The desk is not a User of the customer's
+// organisation, so its rows in the customer's audit trail carry no actor_id and
+// say only "BhoomiTrack desk": which founder acted is recorded in the Founder
+// Dashboard's own founder_audit, and is not the customer's to see.
 const actorFields = (actor) => (actor.req
   ? { actor_id: actor.req.user.id, actor_name: actor.req.user.name || '', actor_role: actor.req.user.role || '' }
-  : { actor_id: null, actor_name: `BhoomiTrack desk (${actor.desk})`, actor_role: 'bhoomitrack_desk' });
+  : { actor_id: null, actor_name: 'BhoomiTrack desk', actor_role: 'bhoomitrack_desk' });
 const byOf = (actor) => (actor.req ? 'customer' : 'desk');
 
 async function auditChange(actor, request, action, before, after, note = '') {
