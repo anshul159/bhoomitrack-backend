@@ -16,7 +16,8 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 const shortDate = (iso) => `${Number(iso.slice(8, 10))} ${MONTHS[Number(iso.slice(5, 7)) - 1]}`;
 const inDays = (n) => (n === 0 ? 'today' : n === 1 ? 'tomorrow' : `in ${n} days`);
 
-const lower = (t) => t.charAt(0).toLowerCase() + t.slice(1);
+// Titles are used exactly as written: lowercasing the first letter turned
+// "PAN card" into "pAN card" and "Udyam" into "udyam".
 const where = (slot) => (slot.site_name ? ` at ${slot.site_name}` : '');
 
 /** A live service that can be requested, never a credit one. */
@@ -39,8 +40,8 @@ function expirySignals(companyFile) {
       slot: slot.slot,
       site_id: slot.site_id || null,
       title: expired
-        ? `Your ${lower(slot.title)}${where(slot)} has expired`
-        : `Your ${lower(slot.title)}${where(slot)} expires ${inDays(slot.days_left)}`,
+        ? `${slot.title}${where(slot)} has expired`
+        : `${slot.title}${where(slot)} expires ${inDays(slot.days_left)}`,
       line: service ? 'Get it renewed for you' : 'Upload the new one when you have it',
       priority: expired ? 100 : 90 - Math.max(0, slot.days_left || 0),
     });
@@ -73,7 +74,7 @@ function missingSignals(companyFile) {
       service_id: s.service_id,
       slot: s.slot,
       site_id: s.site_id || null,
-      title: `No ${lower(s.title)}${where(s)} on file`,
+      title: `${s.title}${where(s)} is not on file`,
       line: 'Upload it, or let us get it done for you',
       priority: 50 - i,          // the rules file's order: the more basic papers first
     }));

@@ -46,8 +46,8 @@ describe('signals (pure)', () => {
     const s = expirySignals(file);
     const ranked = allSignals(file, { profile: {}, inPlace: new Set() }, '2026-11-15').filter((x) => x.kind === 'expiry');
     expect(ranked.map((x) => x.title)).toEqual([
-      'Your site insurance at Sector 62 has expired',
-      'Your labour licence expires in 12 days',
+      'Site insurance at Sector 62 has expired',
+      'Labour licence expires in 12 days',
     ]);
     const licence = s.find((x) => x.slot === 'labour.licence');
     expect(licence.service_id).toBe('compliance.labour_licence');   // live, so we offer to renew
@@ -67,6 +67,8 @@ describe('signals (pure)', () => {
     const file = buildCompanyFile(profile, [], [], now);
     const s = missingSignals(file);
     expect(s.map((x) => x.slot)).toContain('labour.bocw');
+    // Titles as written: an acronym keeps its capitals.
+    expect(s.find((x) => x.slot === 'company.pan').title).toBe('PAN card is not on file');
     expect(s.map((x) => x.slot)).not.toContain('insurance.wc_policy');     // interest only
     expect(s.map((x) => x.slot)).not.toContain('company.cancelled_cheque'); // no service at all
   });
@@ -117,7 +119,7 @@ describe('GET /api/services/home', () => {
     expect(d.badge).toBe(2);
     expect(d.requests.map((r) => r.status)).toEqual(['options_ready']);
     expect(d.savings).toMatchObject({ total_paise: 230000, count: 1 });
-    expect(d.signals[0].title).toMatch(/shop and establishment registration has expired/);
+    expect(d.signals[0].title).toMatch(/Shop and establishment registration has expired/);
 
     const savings = (await request(app).get('/api/services/savings').set(bearer(owner.token))).body.data;
     expect(savings.items).toHaveLength(1);
